@@ -2,7 +2,11 @@ import { api } from "../api";
 import { describeAction } from "../actions";
 import { useDocs } from "../docs";
 import { useStore } from "../store";
+import { useState } from "react";
+import { BackupSection } from "./Backup";
 import { CloseIcon } from "./icons";
+import { OnlineSounds } from "./Online";
+import { ProfilePicker } from "./Profile";
 import { OutputDevice } from "./Setup";
 import { buttonClass, Field, Slider, Toggle } from "./ui";
 
@@ -13,6 +17,13 @@ export function SettingsView() {
   const setHotkeys = useDocs((s) => s.setHotkeys);
   const duckDb = useStore((s) => s.engine?.duck_db ?? -8);
   const setSetupDone = useDocs((s) => s.setSetupDone);
+  const [online, setOnline] = useState(false);
+  const copyCredits = async () => {
+    const credits = await api.credits();
+    if (credits.length === 0) return useStore.getState().notify("No downloaded sounds need a credit yet.", "info");
+    await navigator.clipboard.writeText(credits.join("\n"));
+    useStore.getState().notify(`${credits.length} credit line${credits.length === 1 ? "" : "s"} copied.`, "info");
+  };
 
   return (
     <main className="min-w-0 flex-1 overflow-y-auto p-5">
@@ -31,6 +42,9 @@ export function SettingsView() {
         <section className="space-y-4 rounded-xl bg-panel p-4">
           <Field label="Sound comes out of" hint="Changing this stops whatever is playing">
             <OutputDevice />
+          </Field>
+          <Field label="Tune the sound for" hint="Shapes everything that plays">
+            <ProfilePicker />
           </Field>
           <Field label="Lower music during stingers" hint="Also for pads set to lower the music">
             <Slider
@@ -84,6 +98,23 @@ export function SettingsView() {
             </ul>
           </Field>
         </section>
+        <section className="space-y-4 rounded-xl bg-panel p-4">
+          <Field label="Online sounds" hint="Freesound: free effects and ambiences">
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={() => setOnline(true)} className={buttonClass}>
+                Freesound key and sign-in…
+              </button>
+              <button onClick={() => void copyCredits()} className={buttonClass} title="The credit lines of every sound downloaded from Freesound, ready to paste">
+                Copy credits
+              </button>
+            </div>
+          </Field>
+          <Field label="Backup and moving" hint="One file with your campaigns, scenes, pads and music">
+            <BackupSection />
+          </Field>
+        </section>
+        {online && <OnlineSounds startWithKey onClose={() => setOnline(false)} />}
+
         <section className="flex items-center justify-between rounded-xl bg-panel p-4">
           <span className="text-sm text-dim">Walk through first-time setup again, including the example scenes.</span>
           <button onClick={() => setSetupDone(false)} className={buttonClass}>

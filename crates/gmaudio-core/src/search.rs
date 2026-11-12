@@ -264,6 +264,7 @@ mod tests {
             source: "local".into(),
             license: None,
             attribution: None,
+            trim_db: 0.0,
             tags: tags
                 .iter()
                 .map(|t| Tag {

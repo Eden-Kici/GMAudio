@@ -7,11 +7,13 @@ use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
 use gmaudio_core::engine::{
-    Channel, Engine, EngineState, MixerSettings, PanicOutcome, PlayRequest, Quantize,
+    AudioProfile, Channel, Engine, EngineState, MixerSettings, PanicOutcome, PlayRequest, Quantize,
 };
 use gmaudio_core::library::{Library, LibraryEvent, ScanStatus};
 use gmaudio_core::model::{Asset, Folder, Tag};
 use gmaudio_core::project;
+use gmaudio_core::{bundle, freesound, secrets};
+use tauri_plugin_opener::OpenerExt;
 use gmaudio_core::search::{Query, SearchResult};
 use include_dir::{Dir, include_dir};
 use serde::{Deserialize, Serialize};
@@ -51,6 +53,7 @@ fn save_mixer(state: &AppState) {
         slot.solo = c.solo;
     }
     settings.duck_db = s.duck_db;
+    settings.profile = s.profile;
     if let Ok(json) = serde_json::to_string(&settings) {
         let _ = state.library.set_setting(MIXER_SETTINGS_KEY, &json);
     }
@@ -424,9 +427,233 @@ fn engine_command_log(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[tauri::command]
+fn library_set_trim(state: State<'_, AppState>, asset_id: i64, trim_db: f64) -> CmdResult<Asset> {
+    state.library.set_trim(asset_id, trim_db).map_err(msg)
+}
+
+#[tauri::command]
+fn engine_set_profile(state: State<'_, AppState>, profile: AudioProfile) -> CmdResult<()> {
+    state.engine.set_profile(profile).map_err(msg)?;
+    save_mixer(&state);
+    Ok(())
+}
+
+/// The credit lines of every downloaded sound, for pasting into notes.
+#[tauri::command]
+fn library_credits(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    let mut credits: Vec<String> = state
+        .library
+        .all_assets()
+        .map_err(msg)?
+        .into_iter()
+        .filter(|a| !a.missing)
+        .filter_map(|a| a.attribution)
+        .collect();
+    credits.sort();
+    credits.dedup();
+    Ok(credits)
+}
+
+// ---- Freesound ---------------------------------------------------------------
+
+const FREESOUND_CLIENT_ID: &str = "freesound.client_id";
+const FREESOUND_API_KEY: &str = "freesound.api_key";
+const FREESOUND_TOKENS: &str = "freesound.tokens";
+const FREESOUND_FOLDER: &str = "Freesound";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FreesoundStatus {
+    /// An API key is saved: searching and downloading previews work.
+    has_key: bool,
+    /// A client id is saved too: signing in is possible.
+    can_sign_in: bool,
+    /// Signed in: original files can be downloaded.
+    signed_in: bool,
+}
+
+fn freesound_key(state: &AppState) -> CmdResult<String> {
+    secrets::get(&state.library, FREESOUND_API_KEY)
+        .ok_or_else(|| "Add a Freesound API key first (Settings, Online sounds).".to_string())
+}
+
+fn freesound_credentials(state: &AppState) -> CmdResult<freesound::Credentials> {
+    let client_id = secrets::get(&state.library, FREESOUND_CLIENT_ID)
+        .ok_or_else(|| "Add the Freesound client id first (Settings, Online sounds).".to_string())?;
+    Ok(freesound::Credentials { client_id, api_key: freesound_key(state)? })
+}
+
+/// A working access token, refreshed if the saved one has run out.
+fn freesound_token(state: &AppState) -> Option<String> {
+    let saved = secrets::get(&state.library, FREESOUND_TOKENS)?;
+    let tokens: freesound::Tokens = serde_json::from_str(&saved).ok()?;
+    if tokens.is_fresh() {
+        return Some(tokens.access_token);
+    }
+    let credentials = freesound_credentials(state).ok()?;
+    let renewed = freesound::refresh(&credentials, &tokens).ok()?;
+    secrets::set(&state.library, FREESOUND_TOKENS, &serde_json::to_string(&renewed).ok()?);
+    Some(renewed.access_token)
+}
+
+#[tauri::command]
+fn freesound_status(state: State<'_, AppState>) -> FreesoundStatus {
+    let has_key = secrets::get(&state.library, FREESOUND_API_KEY).is_some();
+    FreesoundStatus {
+        has_key,
+        can_sign_in: has_key && secrets::get(&state.library, FREESOUND_CLIENT_ID).is_some(),
+        signed_in: secrets::get(&state.library, FREESOUND_TOKENS).is_some(),
+    }
+}
+
+#[tauri::command]
+fn freesound_set_credentials(state: State<'_, AppState>, client_id: String, api_key: String) -> FreesoundStatus {
+    for (name, value) in [(FREESOUND_CLIENT_ID, client_id.trim()), (FREESOUND_API_KEY, api_key.trim())] {
+        if value.is_empty() {
+            secrets::delete(&state.library, name);
+        } else {
+            secrets::set(&state.library, name, value);
+        }
+    }
+    // Tokens belong to the old key.
+    secrets::delete(&state.library, FREESOUND_TOKENS);
+    freesound_status(state)
+}
+
+#[tauri::command(async)]
+fn freesound_search(state: State<'_, AppState>, query: String, page: u32) -> CmdResult<freesound::SearchPage> {
+    freesound::search(&freesound_key(&state)?, &query, page).map_err(msg)
+}
+
+/// Opens Freesound's sign-in page in the browser. It ends by showing a
+/// code, which the user pastes back into the app.
+#[tauri::command]
+fn freesound_open_sign_in(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let credentials = freesound_credentials(&state)?;
+    app.opener()
+        .open_url(freesound::authorize_url(&credentials.client_id), None::<&str>)
+        .map_err(msg)
+}
+
+#[tauri::command(async)]
+fn freesound_sign_in(state: State<'_, AppState>, code: String) -> CmdResult<FreesoundStatus> {
+    let tokens = freesound::exchange_code(&freesound_credentials(&state)?, &code).map_err(msg)?;
+    secrets::set(&state.library, FREESOUND_TOKENS, &serde_json::to_string(&tokens).map_err(msg)?);
+    Ok(freesound_status(state))
+}
+
+#[tauri::command]
+fn freesound_sign_out(state: State<'_, AppState>) -> FreesoundStatus {
+    secrets::delete(&state.library, FREESOUND_TOKENS);
+    freesound_status(state)
+}
+
+#[derive(Serialize)]
+struct Downloaded {
+    /// The sound in the library, once it has been read.
+    asset: Option<Asset>,
+    /// The original file was fetched (false: the compressed preview).
+    original: bool,
+}
+
+/// Downloads a sound into the library, with its credit and a channel tag.
+#[tauri::command(async)]
+fn freesound_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    sound: freesound::Sound,
+    channel_tag: Option<String>,
+) -> CmdResult<Downloaded> {
+    let folder = app.path().app_data_dir().map_err(msg)?.join(FREESOUND_FOLDER);
+    std::fs::create_dir_all(&folder).map_err(msg)?;
+    let token = freesound_token(&state);
+    let (path, original) = match freesound::download(&sound, token.as_deref(), &folder) {
+        Ok(path) => {
+            let original = token.is_some() && !path_is_preview(&sound, &path);
+            (path, original)
+        }
+        // The original could not be had (signed out elsewhere, say): the preview still can.
+        Err(_) if token.is_some() => (freesound::download(&sound, None, &folder).map_err(msg)?, false),
+        Err(e) => return Err(msg(e)),
+    };
+    let path_str = path.to_string_lossy().to_string();
+    state
+        .library
+        .set_credit(&path_str, &sound.license, &sound.attribution())
+        .map_err(msg)?;
+    match state.library.add_folder(&folder) {
+        Ok(_) => {}
+        Err(gmaudio_core::Error::FolderAlreadyAdded) => {
+            let id = state.library.folders().map_err(msg)?.into_iter().find(|f| Path::new(&f.path) == folder).map(|f| f.id);
+            state.library.rescan(id).map_err(msg)?;
+        }
+        Err(e) => return Err(msg(e)),
+    }
+    state.library.wait_idle(std::time::Duration::from_secs(120));
+    let asset = state.library.all_assets().map_err(msg)?.into_iter().find(|a| a.path == path_str);
+    let asset = match (asset, channel_tag) {
+        (Some(asset), Some(tag)) if gmaudio_core::model::CHANNEL_TAGS.contains(&tag.as_str()) => {
+            // Say where it belongs, replacing any guess made from the file's name.
+            let mut tags: Vec<Tag> = asset
+                .tags
+                .iter()
+                .filter(|t| t.category != gmaudio_core::model::CHANNEL_TAG_CATEGORY)
+                .cloned()
+                .collect();
+            tags.push(Tag { name: tag, category: gmaudio_core::model::CHANNEL_TAG_CATEGORY.into() });
+            Some(state.library.set_tags(asset.id, &tags).map_err(msg)?)
+        }
+        (asset, _) => asset,
+    };
+    Ok(Downloaded { asset, original })
+}
+
+fn path_is_preview(sound: &freesound::Sound, path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    !ext.eq_ignore_ascii_case(&sound.kind)
+}
+
+/// Opens a Freesound page in the browser (a sound's page, or where to get a key).
+#[tauri::command]
+fn freesound_open_page(app: AppHandle, url: String) -> CmdResult<()> {
+    if !url.starts_with("https://freesound.org/") {
+        return Err("Only Freesound pages can be opened from here.".into());
+    }
+    app.opener().open_url(url, None::<&str>).map_err(msg)
+}
+
+// ---- bundles -----------------------------------------------------------------
+
+#[tauri::command(async)]
+fn bundle_export(
+    state: State<'_, AppState>,
+    path: String,
+    data: Value,
+    asset_ids: Vec<i64>,
+    include_audio: bool,
+) -> CmdResult<bundle::ExportReport> {
+    bundle::export(&state.library, Path::new(&path), data, &asset_ids, include_audio).map_err(msg)
+}
+
+#[tauri::command(async)]
+fn bundle_import(app: AppHandle, state: State<'_, AppState>, path: String) -> CmdResult<bundle::ImportReport> {
+    let source = PathBuf::from(&path);
+    let name = source.file_stem().and_then(|s| s.to_str()).unwrap_or("bundle");
+    let folder = app.path().app_data_dir().map_err(msg)?.join("Imported").join(name);
+    bundle::import(&state.library, &source, &folder).map_err(msg)
+}
+
+/// Shows a file in Explorer.
+#[tauri::command]
+fn reveal_file(app: AppHandle, path: String) -> CmdResult<()> {
+    app.opener().reveal_item_in_dir(path).map_err(msg)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -496,6 +723,20 @@ pub fn run() {
             engine_panic,
             engine_retry_device,
             engine_command_log,
+            library_set_trim,
+            library_credits,
+            engine_set_profile,
+            freesound_status,
+            freesound_set_credentials,
+            freesound_search,
+            freesound_open_sign_in,
+            freesound_sign_in,
+            freesound_sign_out,
+            freesound_download,
+            freesound_open_page,
+            bundle_export,
+            bundle_import,
+            reveal_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GMAudio");

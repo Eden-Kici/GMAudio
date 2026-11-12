@@ -1,9 +1,11 @@
 import { memo, useMemo, useState } from "react";
-import { assetChannels, channelInfo, CHANNELS, channelOfTag, type Asset, type Channel } from "../api";
+import { api, assetChannels, channelInfo, CHANNELS, channelOfTag, type Asset, type Channel } from "../api";
+import { useDocs } from "../docs";
 import { folderName, formatTime, plural, relativeFolder } from "../format";
 import { MAX_PANES, playingKey, RESULT_LIMIT, useStore, type Pane } from "../store";
-import { ChevronIcon, CloseIcon, FolderIcon, PlayIcon, PlusIcon, SearchIcon, SplitIcon, WarningIcon } from "./icons";
+import { CheckIcon, ChevronIcon, CloseIcon, FolderIcon, PlayIcon, PlusIcon, SearchIcon, SplitIcon, WarningIcon } from "./icons";
 import { pickFolder } from "./Sidebar";
+import { formatDb, inputBase, Slider } from "./ui";
 
 /** What a dragged sound carries, so the mixer knows it when it lands. */
 export const DRAG_TYPE = "application/x-gmaudio-asset";
@@ -18,10 +20,13 @@ export function Browser() {
 
   const grid = panes.length === 4 ? "grid-cols-2 grid-rows-2" : panes.length === 3 ? "grid-cols-3" : panes.length === 2 ? "grid-cols-2" : "grid-cols-1";
   return (
-    <main className={`grid min-h-0 min-w-0 flex-1 gap-px bg-line ${grid}`}>
-      {panes.map((pane) => (
-        <PaneView key={pane.id} pane={pane} canSplit={panes.length < MAX_PANES} canClose={panes.length > 1} />
-      ))}
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className={`grid min-h-0 flex-1 gap-px bg-line ${grid}`}>
+        {panes.map((pane) => (
+          <PaneView key={pane.id} pane={pane} canSplit={panes.length < MAX_PANES} canClose={panes.length > 1} />
+        ))}
+      </div>
+      <BulkBar />
     </main>
   );
 }
@@ -37,6 +42,8 @@ function PaneView({ pane, canSplit, canClose }: { pane: Pane; canSplit: boolean;
   const folders = useStore((s) => s.folders);
   const scanning = useStore((s) => s.scan.scanning !== null);
   const selectedId = useStore((s) => s.selectedId);
+  const picked = useStore((s) => s.picked);
+  const pickAll = useStore((s) => s.pickAll);
   const playing = useStore((s) => playingKey(s.engine));
 
   const roots = useMemo(() => folders.map((f) => f.path), [folders]);
@@ -131,7 +138,16 @@ function PaneView({ pane, canSplit, canClose }: { pane: Pane; canSplit: boolean;
             </button>
           </span>
         )}
-        <span className="ml-auto shrink-0 tabular-nums text-faint">
+        {pane.results.length > 1 && (
+          <button
+            onClick={() => pickAll(pane.id)}
+            title="Tick every sound in this list, to tag them together. Ctrl+click ticks one; Shift+click ticks a run."
+            className="ml-auto shrink-0 rounded px-1.5 py-0.5 font-medium text-faint hover:bg-raised hover:text-ink"
+          >
+            Select all
+          </button>
+        )}
+        <span className={`shrink-0 tabular-nums text-faint ${pane.results.length > 1 ? "" : "ml-auto"}`}>
           {pane.total > pane.results.length
             ? `${pane.results.length.toLocaleString()} of ${pane.total.toLocaleString()}`
             : plural(pane.total, "sound")}
@@ -150,6 +166,9 @@ function PaneView({ pane, canSplit, canClose }: { pane: Pane; canSplit: boolean;
                 folder={relativeFolder(asset.path, roots)}
                 playing={playingByAsset.get(asset.id) ?? ""}
                 selected={asset.id === selectedId}
+                paneId={pane.id}
+                picked={picked.includes(asset.id)}
+                picking={picked.length > 0}
               />
             ))}
             {pane.total > RESULT_LIMIT && (
@@ -198,10 +217,16 @@ interface RowProps {
   /** Space-separated channels this asset is playing on right now. */
   playing: string;
   selected: boolean;
+  paneId: number;
+  /** Ticked for tagging several at once. */
+  picked: boolean;
+  /** Some sound is ticked, so a plain click ticks too. */
+  picking: boolean;
 }
 
-const Row = memo(function Row({ asset, folder, playing, selected }: RowProps) {
+const Row = memo(function Row({ asset, folder, playing, selected, paneId, picked, picking }: RowProps) {
   const select = useStore((s) => s.select);
+  const pick = useStore((s) => s.pick);
   const play = useStore((s) => s.play);
   const openMenu = useStore((s) => s.openMenu);
   const setDragging = useStore((s) => s.setDragging);
@@ -233,18 +258,25 @@ const Row = memo(function Row({ asset, folder, playing, selected }: RowProps) {
         e.preventDefault();
         if (!failed) menuAt(e.clientX, e.clientY);
       }}
-      className={`rounded-lg ${selected ? "bg-panel ring-1 ring-line" : "hover:bg-panel"}`}
+      className={`rounded-lg ${picked ? "bg-accent/10 ring-1 ring-accent/40" : selected ? "bg-panel ring-1 ring-line" : "hover:bg-panel"}`}
     >
       <div className="flex min-h-11 items-center gap-2 px-2">
         <button
-          onClick={() => select(selected ? null : asset.id)}
-          onDoubleClick={playDefault}
+          onClick={(e) => {
+            if (e.ctrlKey || e.metaKey || e.shiftKey || picking) pick(paneId, asset.id, e.shiftKey);
+            else select(selected ? null : asset.id);
+          }}
+          onDoubleClick={(e) => {
+            if (!picking) playDefault(e);
+          }}
           aria-expanded={selected}
           title={selected ? "Hide details" : "Click for details and tags. Double-click to play. Drag onto a mixer channel."}
           className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 text-left"
         >
           <span className="flex w-4 shrink-0 justify-center">
-            {failed ? (
+            {picked ? (
+              <CheckIcon width={14} height={14} className="text-accent" />
+            ) : failed ? (
               <WarningIcon className="text-danger" />
             ) : active.length > 0 ? (
               <Equalizer color={channelInfo(active[0] as Channel).color} />
@@ -305,7 +337,7 @@ const Row = memo(function Row({ asset, folder, playing, selected }: RowProps) {
         </div>
       </div>
 
-      {selected && <Details asset={asset} />}
+      {selected && !picking && <Details asset={asset} />}
     </div>
   );
 });
@@ -320,7 +352,91 @@ function Equalizer({ color }: { color: string }) {
   );
 }
 
+/** Shown while sounds are ticked: tag them all in one go. */
+function BulkBar() {
+  const picked = useStore((s) => s.picked);
+  const panes = useStore((s) => s.panes);
+  const clear = useStore((s) => s.clearPicked);
+  const tagPicked = useStore((s) => s.tagPicked);
+  const [draft, setDraft] = useState("");
+  /** The ticked sounds that are on screen, for showing what they have in common. */
+  const known = useMemo(() => {
+    const found = new Map<number, Asset>();
+    for (const pane of panes) for (const asset of pane.results) if (picked.includes(asset.id)) found.set(asset.id, asset);
+    return [...found.values()];
+  }, [panes, picked]);
+  if (picked.length === 0) return null;
+
+  const has = (asset: Asset, tag: string) => asset.tags.some((t) => t.name.toLowerCase() === tag.toLowerCase());
+  const shared = [...new Set(known.flatMap((a) => a.tags.filter((t) => !channelOfTag(t.name)).map((t) => t.name)))].sort();
+  const add = () => {
+    const name = draft.trim().replace(/^#/, "");
+    setDraft("");
+    if (!name) return;
+    const channel = channelOfTag(name);
+    void tagPicked(channel ? { name: channelInfo(channel).tag, category: "channel" } : { name, category: "custom" }, true);
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-accent/40 bg-panel px-4 py-2.5 text-xs" role="region" aria-label="Tag several sounds">
+      <span className="font-semibold text-accent">{picked.length.toLocaleString()} selected</span>
+      <div className="flex items-center gap-1.5">
+        <span className="text-dim">Plays as</span>
+        {CHANNELS.map((c) => {
+          const all = known.length > 0 && known.every((a) => has(a, c.tag));
+          return (
+            <button
+              key={c.id}
+              onClick={() => void tagPicked({ name: c.tag, category: "channel" }, !all)}
+              aria-pressed={all}
+              title={all ? `Remove the ${c.tag} tag from all of them` : `Tag all of them ${c.tag}`}
+              style={{ "--c": c.color } as React.CSSProperties}
+              className={`h-6 rounded-full border px-2.5 font-medium transition-colors ${
+                all ? "border-(--c) bg-(--c) text-bg" : "border-line text-dim hover:border-(--c) hover:text-(--c)"
+              }`}
+            >
+              {c.label}
+            </button>
+          );
+        })}
+      </div>
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") add();
+        }}
+        placeholder="Add a tag to all, press Enter"
+        spellCheck={false}
+        className={`${inputBase} h-7 w-52 text-xs`}
+      />
+      {shared.length > 0 && (
+        <select
+          value=""
+          onChange={(e) => {
+            if (e.target.value) void tagPicked({ name: e.target.value, category: "custom" }, false);
+          }}
+          aria-label="Remove a tag from all"
+          className={`${inputBase} h-7 text-xs`}
+        >
+          <option value="">Remove a tag…</option>
+          {shared.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      )}
+      <button onClick={clear} className="ml-auto h-7 rounded-md bg-raised px-3 font-medium hover:bg-line">
+        Done
+      </button>
+    </div>
+  );
+}
+
 function Details({ asset }: { asset: Asset }) {
+  const advanced = useDocs((s) => s.advanced);
+  const refresh = useStore((s) => s.refresh);
   const setTags = useStore((s) => s.setTags);
   const toggleChannelTag = useStore((s) => s.toggleChannelTag);
   const [draft, setDraft] = useState("");
@@ -401,8 +517,39 @@ function Details({ asset }: { asset: Asset }) {
         />
       </div>
 
+      {(advanced || asset.trim_db !== 0) && asset.status !== "failed" && (
+        <div className="flex items-center gap-1.5">
+          <span className="mr-1 w-14 text-dim">Volume</span>
+          <Slider
+            value={asset.trim_db}
+            min={-12}
+            max={12}
+            onChange={(db) => void api.setTrim(asset.id, db).then(refresh)}
+            format={formatDb}
+            label="This sound's own volume, on top of the automatic levelling"
+            className="w-64"
+          />
+          <span className="text-faint">For a sound that always feels too loud or too quiet.</span>
+        </div>
+      )}
+
+      {asset.attribution && (
+        <p className="text-faint">
+          <span className="text-dim">Credit:</span> <span className="select-text">{asset.attribution}</span>{" "}
+          <button
+            onClick={() => void navigator.clipboard.writeText(asset.attribution ?? "").then(() => useStore.getState().notify("Credit copied.", "info"))}
+            className="font-medium text-dim underline-offset-2 hover:text-ink hover:underline"
+          >
+            Copy
+          </button>
+        </p>
+      )}
+
       <p className="text-faint">
-        <span className="text-dim">{level}.</span> <span className="select-text break-all">{asset.path}</span>
+        <span className="text-dim">{level}.</span> <span className="select-text break-all">{asset.path}</span>{" "}
+        <button onClick={() => void api.revealFile(asset.path).catch(() => {})} className="font-medium text-dim underline-offset-2 hover:text-ink hover:underline">
+          Show in folder
+        </button>
       </p>
     </div>
   );

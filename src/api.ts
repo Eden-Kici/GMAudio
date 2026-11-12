@@ -90,7 +90,57 @@ export interface Asset {
   status: "pending" | "ok" | "failed";
   error: string | null;
   missing: boolean;
+  /** "local", or "freesound" for a downloaded sound. */
+  source: string;
+  license: string | null;
+  /** The credit line a downloaded sound asks for. */
+  attribution: string | null;
+  /** The user's own volume correction in dB. */
+  trim_db: number;
   tags: Tag[];
+}
+
+/** How the whole mix is shaped for the speakers in use. */
+export interface AudioProfile {
+  bass_db: number;
+  treble_db: number;
+  gain_db: number;
+  /** 0 to 1: how much loud and quiet passages are pulled together. */
+  compress: number;
+  limit: boolean;
+}
+
+export interface FreesoundStatus {
+  hasKey: boolean;
+  canSignIn: boolean;
+  signedIn: boolean;
+}
+
+export interface FreesoundSound {
+  id: number;
+  name: string;
+  username: string;
+  license: string;
+  license_url: string;
+  duration: number;
+  tags: string[];
+  kind: string;
+  filesize: number;
+  preview_url: string;
+}
+
+export interface FreesoundPage {
+  count: number;
+  sounds: FreesoundSound[];
+  has_more: boolean;
+}
+
+export interface ImportReport {
+  data: unknown;
+  /** Sound ids in the bundle to sound ids in this library. */
+  asset_map: Record<string, number>;
+  missing: string[];
+  extracted: number;
 }
 
 /** The channels a sound is tagged for, in mixer order. */
@@ -201,6 +251,7 @@ export interface EngineState {
   /** Peak levels: music, ambience, sfx, stingers, master. */
   levels: [number, number, number, number, number];
   music_set: SetState | null;
+  profile: AudioProfile;
 }
 
 export type PanicOutcome = "idle" | "fading" | "cut";
@@ -255,6 +306,26 @@ export const api = {
   setLoopQueue: (on: boolean) => invoke<void>("engine_set_loop_queue", { on }),
   nextTrack: () => invoke<void>("engine_next_track"),
   playQueuedNow: (id: number) => invoke<void>("engine_play_queued_now", { id }),
+  setTrim: (assetId: number, trimDb: number) => invoke<Asset>("library_set_trim", { assetId, trimDb }),
+  credits: () => invoke<string[]>("library_credits"),
+  revealFile: (path: string) => invoke<void>("reveal_file", { path }),
+  setProfile: (profile: AudioProfile) => invoke<void>("engine_set_profile", { profile }),
+
+  freesoundStatus: () => invoke<FreesoundStatus>("freesound_status"),
+  freesoundSetCredentials: (clientId: string, apiKey: string) =>
+    invoke<FreesoundStatus>("freesound_set_credentials", { clientId, apiKey }),
+  freesoundSearch: (query: string, page: number) => invoke<FreesoundPage>("freesound_search", { query, page }),
+  freesoundOpenSignIn: () => invoke<void>("freesound_open_sign_in"),
+  freesoundSignIn: (code: string) => invoke<FreesoundStatus>("freesound_sign_in", { code }),
+  freesoundSignOut: () => invoke<FreesoundStatus>("freesound_sign_out"),
+  freesoundDownload: (sound: FreesoundSound, channelTag: string | null) =>
+    invoke<{ asset: Asset | null; original: boolean }>("freesound_download", { sound, channelTag }),
+  freesoundOpenPage: (url: string) => invoke<void>("freesound_open_page", { url }),
+
+  bundleExport: (path: string, data: unknown, assetIds: number[], includeAudio: boolean) =>
+    invoke<{ sounds: number; skipped: string[]; bytes: number }>("bundle_export", { path, data, assetIds, includeAudio }),
+  bundleImport: (path: string) => invoke<ImportReport>("bundle_import", { path }),
+
   panic: () => invoke<PanicOutcome>("engine_panic"),
   retryDevice: () => invoke<void>("engine_retry_device"),
 };

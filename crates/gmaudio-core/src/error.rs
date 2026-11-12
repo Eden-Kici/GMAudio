@@ -17,6 +17,12 @@ pub enum Error {
     /// The detail is kept for logs; the message is what the GM reads.
     #[error("No speakers or headphones found, so nothing can play yet.")]
     NoDevice(String),
+    /// A problem with a campaign bundle, in plain words.
+    #[error("{0}")]
+    Bundle(String),
+    /// Something went wrong talking to an online service, in plain words.
+    #[error("{0}")]
+    Online(String),
     /// A sound that cannot be played, said in words for the GM.
     #[error("{0}")]
     Unplayable(String),

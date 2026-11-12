@@ -3,7 +3,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { Folder } from "../api";
 import { folderName, plural } from "../format";
 import { useStore } from "../store";
-import { CloseIcon, FolderIcon, PlusIcon, RefreshIcon, WarningIcon } from "./icons";
+import { CloseIcon, FolderIcon, PlusIcon, RefreshIcon, SearchIcon, WarningIcon } from "./icons";
+import { OnlineSounds } from "./Online";
 
 export async function pickFolder(): Promise<string | null> {
   const picked = await open({ directory: true, multiple: false, title: "Choose a folder of music or sounds" });
@@ -20,6 +21,7 @@ export function Sidebar() {
   const addStarterSounds = useStore((s) => s.addStarterSounds);
   const setFilter = (id: number | null) => setPaneFolder(activePane, id);
   const hasStarter = folders.some((f) => /[\\/]Starter Sounds$/i.test(f.path));
+  const [online, setOnline] = useState(false);
 
   const add = async () => {
     const path = await pickFolder();
@@ -55,6 +57,14 @@ export function Sidebar() {
         >
           <PlusIcon /> Add folder
         </button>
+        <button
+          onClick={() => setOnline(true)}
+          title="Search Freesound, a free library of sound effects and ambiences, and download into your library"
+          className="mt-1.5 flex h-9 w-full items-center justify-center gap-2 rounded-md text-sm font-medium text-dim hover:bg-raised hover:text-ink"
+        >
+          <SearchIcon width={14} height={14} /> Find sounds online
+        </button>
+        {online && <OnlineSounds onClose={() => setOnline(false)} />}
         {!hasStarter && (
           <button
             onClick={() => void addStarterSounds()}

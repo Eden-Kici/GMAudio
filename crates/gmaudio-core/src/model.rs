@@ -80,6 +80,9 @@ pub struct Asset {
     pub source: String,
     pub license: Option<String>,
     pub attribution: Option<String>,
+    /// The user's own correction in dB, added to `gain_db` at playback.
+    #[serde(default)]
+    pub trim_db: f64,
     pub tags: Vec<Tag>,
 }
 

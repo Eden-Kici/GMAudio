@@ -140,19 +140,30 @@ export function ColorPicker({ value, onChange }: { value: string; onChange: (col
   );
 }
 
+const openModals: object[] = [];
+
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  // The latest onClose, without re-registering (which would reorder the stack).
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
+    const token = {};
+    openModals.push(token);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
+      // With one dialog on top of another, Esc closes only the top one.
+      if (e.key === "Escape" && openModals[openModals.length - 1] === token) {
+        e.stopImmediatePropagation();
         e.preventDefault();
-        onClose();
+        close.current();
       }
     };
     // Capture, so Esc closes the dialog instead of stopping all sound.
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      openModals.splice(openModals.indexOf(token), 1);
+    };
+  }, []);
   return (
     <div className="fixed inset-0 z-40 flex items-start justify-center bg-black/60 p-6 pt-[10vh]" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div

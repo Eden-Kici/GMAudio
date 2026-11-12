@@ -41,7 +41,7 @@ pub fn play_request(library: &Library, asset_id: i64, channel: Channel) -> Resul
         path: asset.path.into(),
         name: asset.name,
         channel,
-        gain_db: asset.gain_db as f32,
+        gain_db: (asset.gain_db + asset.trim_db) as f32,
         duration_ms: asset.duration_ms,
         ..Default::default()
     })

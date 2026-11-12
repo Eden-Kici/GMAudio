@@ -113,6 +113,9 @@ fn is_supported(path: &Path) -> bool {
         .is_some_and(|e| SUPPORTED_EXTENSIONS.iter().any(|s| s.eq_ignore_ascii_case(e)))
 }
 
+/// Setting that lists credits for downloaded sounds, by file path.
+const CREDITS_KEY: &str = "credits";
+
 impl Library {
     /// Opens (or creates) the library database. Call [`Library::start`]
     /// afterwards to begin background work.
@@ -287,6 +290,46 @@ impl Library {
         Ok(())
     }
 
+    /// Sets the user's own volume correction for one sound, in dB.
+    pub fn set_trim(&self, asset_id: i64, trim_db: f64) -> Result<Asset> {
+        let trim_db = if trim_db.is_finite() { trim_db.clamp(-24.0, 12.0) } else { 0.0 };
+        let asset = {
+            let db = self.inner.db.lock().unwrap();
+            db.set_trim(asset_id, trim_db)?;
+            db.asset(asset_id)?
+        };
+        self.inner.index.write().unwrap().upsert(asset.clone());
+        Ok(asset)
+    }
+
+    /// Every sound in the library, straight from the database.
+    pub fn all_assets(&self) -> Result<Vec<Asset>> {
+        self.inner.db.lock().unwrap().all_assets()
+    }
+
+    /// Remembers who made a downloaded sound and under which licence.
+    ///
+    /// The file may not have been scanned yet, so the credit is also kept
+    /// in a list that is applied whenever a scan finishes.
+    pub fn set_credit(&self, path: &str, license: &str, attribution: &str) -> Result<()> {
+        let mut credits = self.credits()?;
+        credits.insert(path.to_string(), (license.to_string(), attribution.to_string()));
+        let json = serde_json::to_string(&credits).map_err(|e| Error::Bundle(e.to_string()))?;
+        self.set_setting(CREDITS_KEY, &json)?;
+        if self.inner.db.lock().unwrap().set_credit(path, license, attribution)? {
+            self.inner.reload_index()?;
+            self.inner.emit_changed(true);
+        }
+        Ok(())
+    }
+
+    fn credits(&self) -> Result<std::collections::HashMap<String, (String, String)>> {
+        Ok(self
+            .get_setting(CREDITS_KEY)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default())
+    }
+
     /// Documents of one kind as (id, json).
     pub fn docs(&self, kind: &str) -> Result<Vec<(i64, String)>> {
         self.inner.db.lock().unwrap().docs(kind)
@@ -388,6 +431,17 @@ impl Inner {
         Ok(())
     }
 
+    /// Applies remembered credits to sounds that have just been scanned.
+    fn apply_credits(&self) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        let Some(json) = db.get_setting(CREDITS_KEY)? else { return Ok(()) };
+        let credits: std::collections::HashMap<String, (String, String)> = serde_json::from_str(&json).unwrap_or_default();
+        for (path, (license, attribution)) in &credits {
+            db.set_credit(path, license, attribution)?;
+        }
+        Ok(())
+    }
+
     /// Gives assets that have no channel tag one guessed from their folder
     /// names. `since` limits this to a folder's newly added files.
     fn guess_channel_tags(&self, since: Option<(i64, i64)>) -> Result<()> {
@@ -486,6 +540,7 @@ impl Inner {
             let diff = self.db.lock().unwrap().apply_scan(folder_id, &found)?;
             if diff.added > 0 {
                 self.guess_channel_tags(Some((folder_id, before)))?;
+                self.apply_credits()?;
             }
             if !diff.is_empty() {
                 self.reload_index()?;

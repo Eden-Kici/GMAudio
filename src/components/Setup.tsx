@@ -3,6 +3,7 @@ import { api } from "../api";
 import { useDocs } from "../docs";
 import { message, useStore } from "../store";
 import { COLORS, newPad, type Board, type MusicSet, type Scene } from "../types";
+import { ProfilePicker } from "./Profile";
 import { pickFolder } from "./Sidebar";
 import { buttonClass, inputClass, primaryClass } from "./ui";
 
@@ -170,6 +171,8 @@ export function SetupWizard() {
         <>
           <p className="text-sm leading-relaxed text-dim">Pick the speakers or headphones your players will hear. You can change this later in Settings.</p>
           <OutputDevice />
+          <p className="pt-1 text-sm leading-relaxed text-dim">What kind are they? GMAudio tunes the sound to suit.</p>
+          <ProfilePicker />
         </>
       ),
     },

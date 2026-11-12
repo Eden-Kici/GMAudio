@@ -50,6 +50,8 @@ interface Store {
   /** Every non-missing sound in the library, ignoring the search. */
   librarySize: number;
   selectedId: number | null;
+  /** Sounds ticked for tagging several at once. */
+  picked: number[];
   /** The right-click menu, when open. */
   menu: MenuState | null;
   /** A sound being dragged towards the mixer. */
@@ -66,6 +68,12 @@ interface Store {
   splitPane: (after: number) => void;
   closePane: (pane: number) => void;
   select: (id: number | null) => void;
+  /** Ticks or unticks one sound. With `range`, everything from the last ticked one to it. */
+  pick: (pane: number, id: number, range?: boolean) => void;
+  pickAll: (pane: number) => void;
+  clearPicked: () => void;
+  /** Adds a tag to, or removes it from, every ticked sound. */
+  tagPicked: (tag: Tag, on: boolean) => Promise<void>;
   openMenu: (menu: MenuState | null) => void;
   setDragging: (assetId: number | null) => void;
   refresh: () => Promise<void>;
@@ -165,6 +173,7 @@ export const useStore = create<Store>((set, get) => {
     activePane: first.id,
     librarySize: 0,
     selectedId: null,
+    picked: [],
     menu: null,
     dragging: null,
     notice: null,
@@ -242,6 +251,35 @@ export const useStore = create<Store>((set, get) => {
     },
 
     select: (id) => set({ selectedId: id }),
+
+    pick: (pane, id, range) => {
+      const picked = get().picked;
+      const rows = get().panes.find((p) => p.id === pane)?.results.map((a) => a.id) ?? [];
+      const last = picked[picked.length - 1];
+      const from = rows.indexOf(last);
+      const to = rows.indexOf(id);
+      if (range && from >= 0 && to >= 0) {
+        const span = rows.slice(Math.min(from, to), Math.max(from, to) + 1);
+        // Keep the clicked row last, so the next range starts from it.
+        set({ picked: [...picked.filter((x) => !span.includes(x)), ...span.filter((x) => x !== id), id] });
+      } else {
+        set({ picked: picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id] });
+      }
+    },
+
+    pickAll: (pane) => {
+      const rows = get().panes.find((p) => p.id === pane)?.results.map((a) => a.id) ?? [];
+      const picked = get().picked;
+      set({ picked: [...picked, ...rows.filter((id) => !picked.includes(id))] });
+    },
+
+    clearPicked: () => set({ picked: [] }),
+
+    tagPicked: (tag, on) =>
+      guard(async () => {
+        await api.setTagOn(get().picked, tag, on);
+        await runAllSearches();
+      }),
     openMenu: (menu) => set({ menu }),
     setDragging: (assetId) => set({ dragging: assetId }),
 

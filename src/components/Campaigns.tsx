@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { duplicateSession } from "../actions";
+import { importBundle } from "../bundle";
+import { ExportDialog } from "./Backup";
 import { useDocs } from "../docs";
 import { ChevronIcon, PlusIcon } from "./icons";
 import { buttonClass, ConfirmButton, inputClass, Modal, primaryClass, Segmented } from "./ui";
@@ -35,6 +37,7 @@ function CampaignManager({ onClose }: { onClose: () => void }) {
   const remove = useDocs((s) => s.remove);
   const campaign = campaigns.find((c) => c.id === campaignId);
   const mine = sessions.filter((s) => s.data.campaign_id === campaignId);
+  const [exporting, setExporting] = useState(false);
 
   const newCampaign = async () => {
     const id = await save("campaign", null, { name: `Campaign ${campaigns.length + 1}` });
@@ -130,7 +133,14 @@ function CampaignManager({ onClose }: { onClose: () => void }) {
               <button onClick={() => void newSession()} className="flex h-9 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-dim hover:bg-raised hover:text-ink">
                 <PlusIcon width={12} height={12} /> New session
               </button>
-              <div className="pt-3">
+              <div className="flex items-center justify-between pt-3">
+                <button
+                  onClick={() => setExporting(true)}
+                  title="Save this campaign to one file, to back it up or move it to another computer"
+                  className="text-xs font-medium text-dim hover:text-ink"
+                >
+                  Save to a file…
+                </button>
                 <ConfirmButton
                   label="Delete this campaign"
                   confirm="Delete the campaign and its sessions? Scenes and pads are kept and become shared."
@@ -150,11 +160,19 @@ function CampaignManager({ onClose }: { onClose: () => void }) {
           )}
         </div>
       </div>
-      <div className="flex justify-end border-t border-line px-4 py-3">
+      <div className="flex items-center justify-between border-t border-line px-4 py-3">
+        <button
+          onClick={() => void importBundle()}
+          title="Add a campaign from a file saved on this or another computer"
+          className={buttonClass}
+        >
+          Open a campaign file…
+        </button>
         <button onClick={onClose} className={primaryClass}>
           Done
         </button>
       </div>
+      {exporting && campaign && <ExportDialog campaignId={campaign.id} name={campaign.data.name || "Untitled campaign"} onClose={() => setExporting(false)} />}
     </Modal>
   );
 }
@@ -206,4 +224,3 @@ export function MoreOptions() {
   );
 }
 
-void buttonClass;

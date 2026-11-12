@@ -72,11 +72,15 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX docs_kind ON docs(kind);
     ",
+    // 3: a per-sound volume correction on top of the automatic levelling
+    "
+    ALTER TABLE assets ADD COLUMN trim_db REAL NOT NULL DEFAULT 0;
+    ",
 ];
 
 const ASSET_COLUMNS: &str = "id, folder_id, path, name, ext, size, mtime, hash, duration_ms, \
      sample_rate, channels, loudness_lufs, gain_db, bpm, beat_offset_ms, status, error, missing, \
-     source, license, attribution";
+     source, license, attribution, trim_db";
 
 /// A file found on disk during a folder scan.
 #[derive(Debug, Clone)]
@@ -136,6 +140,7 @@ fn asset_from_row(row: &Row) -> rusqlite::Result<Asset> {
         source: row.get(18)?,
         license: row.get(19)?,
         attribution: row.get(20)?,
+        trim_db: row.get(21)?,
         tags: Vec::new(),
     })
 }
@@ -546,6 +551,24 @@ impl Db {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![folder_id, added_at], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Makes one sound louder or quieter than the automatic levelling
+    /// leaves it. Survives rescans.
+    pub fn set_trim(&self, asset_id: i64, trim_db: f64) -> Result<()> {
+        self.conn
+            .execute("UPDATE assets SET trim_db = ?2 WHERE id = ?1", params![asset_id, trim_db])?;
+        Ok(())
+    }
+
+    /// Records where a sound came from and how to credit it. Returns
+    /// whether a sound at that path exists yet.
+    pub fn set_credit(&self, path: &str, license: &str, attribution: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE assets SET source = 'freesound', license = ?2, attribution = ?3 WHERE path = ?1",
+            params![path, license, attribution],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Marks sounds long enough to have a tempo, but analysed before tempo

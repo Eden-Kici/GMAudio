@@ -13,6 +13,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use kira::backend::Backend;
+use kira::effect::compressor::{CompressorBuilder, CompressorHandle};
+use kira::effect::eq_filter::{EqFilterBuilder, EqFilterHandle, EqFilterKind};
 use kira::effect::{Effect, EffectBuilder};
 use kira::info::Info;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
@@ -20,7 +22,7 @@ use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 use kira::sound::{FromFileError, PlaybackState, Region};
 use kira::track::{TrackBuilder, TrackHandle};
 use kira::{
-    AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Easing, Frame, Panning, Tween,
+    AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Easing, Frame, Mix, Panning, Tween,
 };
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +107,44 @@ fn default_true() -> bool {
     true
 }
 
+/// How the final mix is shaped for the speakers or headphones in use.
+///
+/// Applied on the master, after every channel. Each file's own loudness
+/// levelling still applies underneath.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioProfile {
+    /// Bass boost or cut in dB (a shelf below about 120 Hz).
+    pub bass_db: f32,
+    /// Treble boost or cut in dB (a shelf above about 6 kHz).
+    pub treble_db: f32,
+    /// Overall level in dB.
+    pub gain_db: f32,
+    /// 0 to 1: how much loud and quiet passages are pulled together.
+    pub compress: f32,
+    /// Catch peaks just before they would distort.
+    pub limit: bool,
+}
+
+impl Default for AudioProfile {
+    fn default() -> Self {
+        Self { bass_db: 0.0, treble_db: 0.0, gain_db: 0.0, compress: 0.0, limit: true }
+    }
+}
+
+impl AudioProfile {
+    fn sanitized(self) -> Self {
+        let clean = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0 };
+        Self {
+            bass_db: clean(self.bass_db, -18.0, 12.0),
+            treble_db: clean(self.treble_db, -18.0, 12.0),
+            gain_db: clean(self.gain_db, -24.0, 12.0),
+            compress: clean(self.compress, 0.0, 1.0),
+            limit: self.limit,
+        }
+    }
+}
+
 /// Everything about the mixer that is remembered between sessions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MixerSettings {
@@ -114,6 +154,8 @@ pub struct MixerSettings {
     /// How far music drops (in dB, negative) while a ducking sound plays.
     #[serde(default = "default_duck_db")]
     pub duck_db: f32,
+    #[serde(default)]
+    pub profile: AudioProfile,
 }
 
 fn default_duck_db() -> f32 {
@@ -132,6 +174,7 @@ impl Default for MixerSettings {
                 solo: false,
             }),
             duck_db: default_duck_db(),
+            profile: AudioProfile::default(),
         }
     }
 }
@@ -144,6 +187,7 @@ impl MixerSettings {
             c.volume = clamp_unit(c.volume);
             c.fade_ms = c.fade_ms.min(60_000);
         }
+        self.profile = self.profile.sanitized();
         self.duck_db = if self.duck_db.is_finite() { self.duck_db.clamp(-40.0, 0.0) } else { default_duck_db() };
         self
     }
@@ -308,6 +352,7 @@ pub struct EngineState {
     pub levels: [f32; 5],
     /// The dynamic music set that is playing, if any.
     pub music_set: Option<SetState>,
+    pub profile: AudioProfile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -400,6 +445,29 @@ struct Emitter {
     last: Option<usize>,
 }
 
+/// The master's tone and dynamics controls.
+struct Shaping {
+    bass: EqFilterHandle,
+    treble: EqFilterHandle,
+    compressor: CompressorHandle,
+    limiter: CompressorHandle,
+}
+
+impl Shaping {
+    fn apply(&mut self, profile: &AudioProfile, tween: Tween) {
+        self.bass.set_gain(profile.bass_db, tween);
+        self.treble.set_gain(profile.treble_db, tween);
+        // More compression: a lower threshold, a steeper ratio, and gain
+        // to make up for what is taken off the loud parts.
+        let c = profile.compress as f64;
+        self.compressor.set_threshold(-12.0 - 18.0 * c, tween);
+        self.compressor.set_ratio(1.0 + 3.0 * c, tween);
+        self.compressor.set_makeup_gain((6.0 * c) as f32, tween);
+        self.compressor.set_mix(if c > 0.0 { Mix::WET } else { Mix::DRY }, tween);
+        self.limiter.set_mix(if profile.limit { Mix::WET } else { Mix::DRY }, tween);
+    }
+}
+
 /// Measures the peak level passing through a track.
 struct Meter(Arc<AtomicU32>);
 
@@ -466,6 +534,7 @@ pub struct Mixer<B: Backend = DefaultBackend> {
     /// Everything passes through this track on its way out: the master.
     bus: TrackHandle,
     tracks: Vec<TrackHandle>,
+    shaping: Shaping,
     meters: Vec<Arc<AtomicU32>>,
     levels: [f32; 5],
     emitters: Vec<Emitter>,
@@ -494,7 +563,25 @@ impl<B: Backend> Mixer<B> {
         let settings = settings.sanitized();
         let limit = |e: kira::ResourceLimitReached| Error::Playback(e.to_string());
         let mut meters = Vec::with_capacity(5);
-        let mut bus_builder = TrackBuilder::new().volume(fader_to_db(settings.master_volume));
+        let mut bus_builder =
+            TrackBuilder::new().volume(fader_to_db(settings.master_volume) + settings.profile.gain_db);
+        let mut shaping = Shaping {
+            bass: bus_builder.add_effect(EqFilterBuilder::new(EqFilterKind::LowShelf, 120.0, 0.0, 0.7)),
+            treble: bus_builder.add_effect(EqFilterBuilder::new(EqFilterKind::HighShelf, 6000.0, 0.0, 0.7)),
+            compressor: bus_builder.add_effect(
+                CompressorBuilder::new()
+                    .attack_duration(Duration::from_millis(15))
+                    .release_duration(Duration::from_millis(250)),
+            ),
+            limiter: bus_builder.add_effect(
+                CompressorBuilder::new()
+                    .threshold(-1.5)
+                    .ratio(20.0)
+                    .attack_duration(Duration::from_millis(1))
+                    .release_duration(Duration::from_millis(80)),
+            ),
+        };
+        shaping.apply(&settings.profile, Tween { duration: Duration::ZERO, ..Default::default() });
         let master_meter = bus_builder.add_effect(MeterBuilder);
         let mut bus = manager.add_sub_track(bus_builder).map_err(limit)?;
         let mut tracks = Vec::with_capacity(4);
@@ -507,6 +594,7 @@ impl<B: Backend> Mixer<B> {
         Ok(Self {
             manager,
             bus,
+            shaping,
             meters,
             levels: [0.0; 5],
             emitters: Vec::new(),
@@ -946,6 +1034,19 @@ impl<B: Backend> Mixer<B> {
         self.apply_channel(Channel::Music);
     }
 
+    fn apply_master(&mut self) {
+        let db = fader_to_db(self.settings.master_volume) + self.settings.profile.gain_db;
+        self.bus.set_volume(db, smooth());
+    }
+
+    /// Shapes the final mix for the speakers or headphones in use.
+    pub fn set_profile(&mut self, profile: AudioProfile) {
+        self.settings.profile = profile.sanitized();
+        let profile = self.settings.profile;
+        self.shaping.apply(&profile, smooth());
+        self.apply_master();
+    }
+
     pub fn set_channel_solo(&mut self, channel: Channel, solo: bool) {
         self.settings.channels[channel.index()].solo = solo;
         for c in Channel::ALL {
@@ -994,8 +1095,7 @@ impl<B: Backend> Mixer<B> {
 
     pub fn set_master_volume(&mut self, volume: f32) {
         self.settings.master_volume = clamp_unit(volume);
-        self.bus
-            .set_volume(fader_to_db(self.settings.master_volume), smooth());
+        self.apply_master();
     }
 
     /// First press fades everything out over one second. A second press
@@ -1120,6 +1220,7 @@ impl<B: Backend> Mixer<B> {
             duck_db: self.settings.duck_db,
             levels: self.levels,
             music_set: self.set_state(),
+            profile: self.settings.profile,
         }
     }
 }
@@ -1211,6 +1312,7 @@ pub enum Command {
     SetSoundTrim { id: u64, trim_db: f32 },
     SetChannelSolo { channel: Channel, solo: bool },
     SetDuckDb { db: f32 },
+    SetProfile(AudioProfile),
     /// Keep a decoded short sound ready for an instant start.
     Cache(Decoded),
     AddEmitter(EmitterRequest),
@@ -1449,6 +1551,10 @@ impl Engine {
         self.send(Command::SetDuckDb { db }).map(|_| ())
     }
 
+    pub fn set_profile(&self, profile: AudioProfile) -> Result<()> {
+        self.send(Command::SetProfile(profile)).map(|_| ())
+    }
+
     /// Decodes short sounds here, on the caller's thread, and hands them
     /// to the engine so pads and stingers start without a disk read.
     pub fn preload(&self, paths: &[PathBuf]) {
@@ -1580,6 +1686,10 @@ fn run<B: Backend>(mixer: &mut Mixer<B>, command: Command) -> Result<Reply> {
             mixer.set_duck_db(db);
             Ok(Reply::Done)
         }
+        Command::SetProfile(profile) => {
+            mixer.set_profile(profile);
+            Ok(Reply::Done)
+        }
         Command::Cache(Decoded(path, data)) => {
             mixer.cache_sound(path, data);
             Ok(Reply::Done)
@@ -1658,6 +1768,10 @@ fn run_offline(
             settings.duck_db = db.clamp(-40.0, 0.0);
             Ok(Reply::Done)
         }
+        Command::SetProfile(profile) => {
+            settings.profile = profile.sanitized();
+            Ok(Reply::Done)
+        }
         Command::AddEmitter(_) | Command::ApplyScene(_) | Command::PlaySet(_) | Command::PlayStinger { .. } => {
             Err(no_device())
         }
@@ -1696,6 +1810,7 @@ fn current_state<B: Backend>(
             duck_db: settings.duck_db,
             levels: [0.0; 5],
             music_set: None,
+            profile: settings.profile,
         },
     }
 }
@@ -2111,6 +2226,39 @@ mod tests {
         m.set_channel_solo(Channel::Ambience, false);
         play_for(&mut m, 300);
         assert!(m.state().levels[4] > 0.02);
+    }
+
+    #[test]
+    fn an_audio_profile_shapes_the_master() {
+        let f = files();
+        let mut m = mixer();
+        m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        play_for(&mut m, 400);
+        let flat = m.state().levels[4];
+        assert!(flat > 0.02);
+
+        // The 220 Hz test tone sits above the bass shelf, so cutting bass
+        // barely touches it, while turning the level down clearly does.
+        m.set_profile(AudioProfile { bass_db: -12.0, ..Default::default() });
+        play_for(&mut m, 400);
+        let bass_cut = m.state().levels[4];
+        assert!(bass_cut > flat * 0.5, "{flat} -> {bass_cut}");
+
+        // The master meter sits before the master's own volume, so check
+        // the setting took and that out-of-range values are tamed.
+        m.set_profile(AudioProfile { gain_db: 99.0, compress: 5.0, bass_db: f32::NAN, ..Default::default() });
+        let profile = m.state().profile;
+        assert_eq!((profile.gain_db, profile.compress, profile.bass_db), (12.0, 1.0, 0.0));
+        play_for(&mut m, 200);
+        assert!(m.state().levels[4].is_finite());
+
+        // Old saved settings without a profile load with the default one.
+        let old: MixerSettings = serde_json::from_str(
+            r#"{"master_volume":0.5,"channels":[{"volume":1,"muted":false,"fade_ms":0},{"volume":1,"muted":false,"fade_ms":0},{"volume":1,"muted":false,"fade_ms":0},{"volume":1,"muted":false,"fade_ms":0}]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.profile, AudioProfile::default());
+        assert!(old.channels[0].loop_queue);
     }
 
     #[test]
