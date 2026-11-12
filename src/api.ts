@@ -133,6 +133,7 @@ export interface ChannelState {
   muted: boolean;
   fade_ms: number;
   loop_queue: boolean;
+  solo: boolean;
   queue: QueuedState[];
 }
 
@@ -145,6 +146,29 @@ export interface SoundState {
   duration_ms: number | null;
   looping: boolean;
   stopping: boolean;
+  trim_db: number;
+  tag: string | null;
+}
+
+export interface EmitterState {
+  id: number;
+  name: string;
+  min_ms: number;
+  max_ms: number;
+  tag: string | null;
+}
+
+export interface PlayOptions {
+  looping?: boolean;
+  interrupt?: boolean;
+  /** This use's own volume in dB, on top of loudness levelling. */
+  trimDb?: number;
+  /** Playback speed; also shifts pitch. */
+  rate?: number;
+  pan?: number;
+  /** Lower the music while this plays. */
+  duck?: boolean;
+  tag?: string;
 }
 
 export interface EngineState {
@@ -155,6 +179,12 @@ export interface EngineState {
   sounds: SoundState[];
   panic_armed: boolean;
   last_error: string | null;
+  emitters: EmitterState[];
+  scene: { id: number; name: string } | null;
+  ducked: boolean;
+  duck_db: number;
+  /** Peak levels: music, ambience, sfx, stingers, master. */
+  levels: [number, number, number, number, number];
 }
 
 export type PanicOutcome = "idle" | "fading" | "cut";
@@ -178,6 +208,7 @@ export const api = {
   setTags: (assetId: number, tags: Tag[]) => invoke<Asset>("library_set_tags", { assetId, tags }),
   setTagOn: (assetIds: number[], tag: Tag, on: boolean) =>
     invoke<void>("library_set_tag_on", { assetIds, tag, on }),
+  assets: (ids: number[]) => invoke<Asset[]>("library_assets", { ids }),
 
   uiGet: (key: string) => invoke<string | null>("ui_get", { key }),
   uiSet: (key: string, value: string) => invoke<void>("ui_set", { key, value }),
@@ -186,11 +217,15 @@ export const api = {
   docDelete: (id: number) => invoke<void>("doc_delete", { id }),
 
   engineState: () => invoke<EngineState>("engine_state"),
-  play: (assetId: number, channel: Channel, options: { interrupt?: boolean; looping?: boolean } = {}) =>
-    invoke<number>("engine_play", { assetId, channel, ...options }),
+  play: (assetId: number, channel: Channel, options: PlayOptions = {}) =>
+    invoke<number>("engine_play", { assetId, channel, options }),
+  preload: (assetIds: number[]) => invoke<void>("engine_preload", { assetIds }),
+  sceneApply: (id: number, data: unknown) => invoke<string[]>("scene_apply", { id, data }),
+  setSoundTrim: (id: number, trimDb: number) => invoke<void>("engine_set_sound_trim", { id, trimDb }),
+  setDuckDb: (db: number) => invoke<void>("engine_set_duck_db", { db }),
   stopSound: (id: number) => invoke<void>("engine_stop_sound", { id }),
   stopChannel: (channel: Channel) => invoke<void>("engine_stop_channel", { channel }),
-  setChannel: (channel: Channel, change: { volume?: number; muted?: boolean; fadeMs?: number }) =>
+  setChannel: (channel: Channel, change: { volume?: number; muted?: boolean; fadeMs?: number; solo?: boolean }) =>
     invoke<void>("engine_set_channel", { channel, ...change }),
   setMaster: (volume: number) => invoke<void>("engine_set_master", { volume }),
   setSoundLooping: (id: number, looping: boolean) => invoke<void>("engine_set_sound_looping", { id, looping }),

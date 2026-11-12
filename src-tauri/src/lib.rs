@@ -4,16 +4,17 @@
 //! the UI only draws what the engine reports.
 
 use std::fmt::Display;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gmaudio_core::engine::{
     Channel, Engine, EngineState, MixerSettings, PanicOutcome, PlayRequest,
 };
 use gmaudio_core::library::{Library, LibraryEvent, ScanStatus};
-use gmaudio_core::model::{AnalysisStatus, Asset, Folder, Tag};
+use gmaudio_core::model::{Asset, Folder, Tag};
+use gmaudio_core::project;
 use gmaudio_core::search::{Query, SearchResult};
 use include_dir::{Dir, include_dir};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -46,7 +47,9 @@ fn save_mixer(state: &AppState) {
         slot.muted = c.muted;
         slot.fade_ms = c.fade_ms;
         slot.loop_queue = c.loop_queue;
+        slot.solo = c.solo;
     }
+    settings.duck_db = s.duck_db;
     if let Ok(json) = serde_json::to_string(&settings) {
         let _ = state.library.set_setting(MIXER_SETTINGS_KEY, &json);
     }
@@ -109,6 +112,12 @@ fn library_tags(state: State<'_, AppState>) -> CmdResult<Vec<TagCount>> {
             count,
         })
         .collect())
+}
+
+/// The sounds with these ids, skipping any that are no longer in the library.
+#[tauri::command(async)]
+fn library_assets(state: State<'_, AppState>, ids: Vec<i64>) -> Vec<Asset> {
+    ids.into_iter().filter_map(|id| state.library.asset(id)).collect()
 }
 
 #[tauri::command(async)]
@@ -181,41 +190,73 @@ fn engine_state(state: State<'_, AppState>) -> CmdResult<EngineState> {
     state.engine.state().map_err(msg)
 }
 
+/// How one use of a sound differs from the plain "play it".
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PlayOptions {
+    looping: Option<bool>,
+    interrupt: bool,
+    trim_db: f32,
+    rate: f64,
+    pan: f32,
+    duck: Option<bool>,
+    tag: Option<String>,
+}
+
 #[tauri::command(async)]
 fn engine_play(
     state: State<'_, AppState>,
     asset_id: i64,
     channel: Channel,
-    looping: Option<bool>,
-    interrupt: Option<bool>,
+    options: Option<PlayOptions>,
 ) -> CmdResult<u64> {
-    let asset = state
-        .library
-        .asset(asset_id)
-        .ok_or("That sound is no longer in the library.")?;
-    if asset.missing {
-        return Err(format!("\"{}\" was not found on disk.", asset.name));
-    }
-    if asset.status == AnalysisStatus::Failed {
-        return Err(format!(
-            "\"{}\" could not be read: {}",
-            asset.name,
-            asset.error.as_deref().unwrap_or("unknown problem")
-        ));
-    }
-    state
-        .engine
-        .play(PlayRequest {
-            asset_id,
-            path: asset.path.into(),
-            name: asset.name,
-            channel,
-            gain_db: asset.gain_db as f32,
-            duration_ms: asset.duration_ms,
-            looping,
-            interrupt: interrupt.unwrap_or(false),
-        })
-        .map_err(msg)
+    let o = options.unwrap_or_default();
+    let request = PlayRequest {
+        looping: o.looping,
+        interrupt: o.interrupt,
+        trim_db: o.trim_db,
+        rate: o.rate,
+        pan: o.pan,
+        duck: o.duck,
+        tag: o.tag,
+        ..project::play_request(&state.library, asset_id, channel).map_err(msg)?
+    };
+    state.engine.play(request).map_err(msg)
+}
+
+/// Decodes short sounds ahead of time so pads and stingers start at once.
+#[tauri::command(async)]
+fn engine_preload(state: State<'_, AppState>, asset_ids: Vec<i64>) -> CmdResult<()> {
+    let paths: Vec<PathBuf> = asset_ids
+        .into_iter()
+        .filter_map(|id| state.library.asset(id))
+        .filter(|a| !a.missing && a.duration_ms.is_some_and(|d| d <= project::PRELOAD_MAX_MS))
+        .map(|a| PathBuf::from(a.path))
+        .collect();
+    state.engine.preload(&paths);
+    Ok(())
+}
+
+/// Switches the whole soundscape to a scene. Returns the sounds that had
+/// to be left out (missing files), so the interface can say so.
+#[tauri::command(async)]
+fn scene_apply(state: State<'_, AppState>, id: i64, data: Value) -> CmdResult<Vec<String>> {
+    let doc: project::SceneDoc = serde_json::from_value(data).map_err(msg)?;
+    let resolved = project::scene_request(&state.library, id, &doc);
+    state.engine.apply_scene(resolved.request).map_err(msg)?;
+    Ok(resolved.skipped)
+}
+
+#[tauri::command(async)]
+fn engine_set_sound_trim(state: State<'_, AppState>, id: u64, trim_db: f32) -> CmdResult<()> {
+    state.engine.set_sound_trim(id, trim_db).map_err(msg)
+}
+
+#[tauri::command(async)]
+fn engine_set_duck_db(state: State<'_, AppState>, db: f32) -> CmdResult<()> {
+    state.engine.set_duck_db(db).map_err(msg)?;
+    save_mixer(&state);
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -239,6 +280,7 @@ fn engine_set_channel(
     volume: Option<f32>,
     muted: Option<bool>,
     fade_ms: Option<u32>,
+    solo: Option<bool>,
 ) -> CmdResult<()> {
     if let Some(v) = volume {
         state.engine.set_channel_volume(channel, v).map_err(msg)?;
@@ -248,6 +290,9 @@ fn engine_set_channel(
     }
     if let Some(f) = fade_ms {
         state.engine.set_channel_fade(channel, f).map_err(msg)?;
+    }
+    if let Some(s) = solo {
+        state.engine.set_channel_solo(channel, s).map_err(msg)?;
     }
     save_mixer(&state);
     Ok(())
@@ -301,6 +346,7 @@ fn engine_command_log(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -337,6 +383,7 @@ pub fn run() {
             library_status,
             library_set_tags,
             library_set_tag_on,
+            library_assets,
             library_add_starter_sounds,
             library_tags,
             ui_get,
@@ -354,6 +401,10 @@ pub fn run() {
             engine_set_loop_queue,
             engine_next_track,
             engine_play_queued_now,
+            engine_preload,
+            engine_set_sound_trim,
+            engine_set_duck_db,
+            scene_apply,
             engine_panic,
             engine_retry_device,
             engine_command_log,

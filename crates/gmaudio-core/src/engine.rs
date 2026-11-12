@@ -4,18 +4,24 @@
 //! a mixer on its own thread: the rest of the app only sends it commands
 //! and receives state snapshots, so playback never depends on the UI.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use kira::backend::Backend;
+use kira::effect::{Effect, EffectBuilder};
+use kira::info::Info;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 use kira::sound::{FromFileError, PlaybackState, Region};
 use kira::track::{TrackBuilder, TrackHandle};
-use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Easing, Tween};
+use kira::{
+    AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Easing, Frame, Panning, Tween,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
@@ -32,12 +38,18 @@ const DEVICE_RETRY: Duration = Duration::from_secs(3);
 /// decoded into memory up front.
 const STATIC_MAX_MS: i64 = 20_000;
 const COMMAND_LOG_SIZE: usize = 300;
+/// How fast music drops when a ducking sound starts, and recovers after.
+const DUCK_ATTACK: Duration = Duration::from_millis(120);
+const DUCK_RELEASE: Duration = Duration::from_millis(700);
+/// Preloaded sounds are kept up to this many frames in total (~160 MB).
+const CACHE_MAX_FRAMES: usize = 20_000_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
     Music,
     Ambience,
+    #[default]
     Sfx,
     Stingers,
 }
@@ -80,6 +92,9 @@ pub struct ChannelSettings {
     /// With a single track this simply repeats that track.
     #[serde(default = "default_true")]
     pub loop_queue: bool,
+    /// While any channel is soloed, only soloed channels are heard.
+    #[serde(default)]
+    pub solo: bool,
 }
 
 fn default_true() -> bool {
@@ -92,6 +107,13 @@ pub struct MixerSettings {
     pub master_volume: f32,
     /// In [`Channel::ALL`] order.
     pub channels: [ChannelSettings; 4],
+    /// How far music drops (in dB, negative) while a ducking sound plays.
+    #[serde(default = "default_duck_db")]
+    pub duck_db: f32,
+}
+
+fn default_duck_db() -> f32 {
+    -8.0
 }
 
 impl Default for MixerSettings {
@@ -103,7 +125,9 @@ impl Default for MixerSettings {
                 muted: false,
                 fade_ms: c.default_fade_ms(),
                 loop_queue: true,
+                solo: false,
             }),
+            duck_db: default_duck_db(),
         }
     }
 }
@@ -116,6 +140,7 @@ impl MixerSettings {
             c.volume = clamp_unit(c.volume);
             c.fade_ms = c.fade_ms.min(60_000);
         }
+        self.duck_db = if self.duck_db.is_finite() { self.duck_db.clamp(-40.0, 0.0) } else { default_duck_db() };
         self
     }
 }
@@ -136,7 +161,7 @@ pub fn fader_to_db(position: f32) -> f32 {
     (40.0 * p.log10()).max(Decibels::SILENCE.0)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PlayRequest {
     pub asset_id: i64,
     pub path: PathBuf,
@@ -150,6 +175,69 @@ pub struct PlayRequest {
     /// Music only: crossfade to this track right now instead of queueing
     /// it behind the one that is playing.
     pub interrupt: bool,
+    /// Volume of this use of the sound, on top of `gain_db`: a pad's or a
+    /// scene layer's own level.
+    pub trim_db: f32,
+    /// Playback speed, which also shifts pitch. 0 means normal speed.
+    pub rate: f64,
+    /// -1 (left) to 1 (right).
+    pub pan: f32,
+    /// Lower the music while this plays. `None`: stingers do, others do not.
+    pub duck: Option<bool>,
+    /// Who started it (e.g. `pad:12:3`), so the UI can light the right button.
+    pub tag: Option<String>,
+}
+
+/// A layer that plays a sound from its pool every so often: distant
+/// thunder, a creaking floorboard.
+#[derive(Debug, Clone)]
+pub struct EmitterRequest {
+    pub name: String,
+    pub sounds: Vec<PlayRequest>,
+    pub min_ms: u32,
+    pub max_ms: u32,
+    /// Place each occurrence somewhere different between the speakers.
+    pub random_pan: bool,
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum SceneMusic {
+    /// Leave whatever music is playing alone.
+    #[default]
+    Keep,
+    /// Fade the music out.
+    Silence,
+    /// Play these tracks in order (and round again if the queue repeats).
+    Tracks(Vec<PlayRequest>),
+}
+
+/// A whole soundscape, applied in one go.
+#[derive(Debug, Clone, Default)]
+pub struct SceneRequest {
+    pub id: i64,
+    pub name: String,
+    /// How long the change takes.
+    pub transition_ms: u32,
+    pub music: SceneMusic,
+    /// Looping ambience layers.
+    pub layers: Vec<PlayRequest>,
+    pub emitters: Vec<EmitterRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EmitterState {
+    pub id: u64,
+    pub name: String,
+    pub min_ms: u32,
+    pub max_ms: u32,
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SceneState {
+    pub id: i64,
+    pub name: String,
 }
 
 /// A music track waiting for its turn.
@@ -169,6 +257,7 @@ pub struct ChannelState {
     pub muted: bool,
     pub fade_ms: u32,
     pub loop_queue: bool,
+    pub solo: bool,
     /// Tracks waiting to play, next first. Only music has a queue.
     pub queue: Vec<QueuedState>,
 }
@@ -185,6 +274,8 @@ pub struct SoundState {
     pub looping: bool,
     /// Fading out; it will be gone when the fade ends.
     pub stopping: bool,
+    pub trim_db: f32,
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -198,6 +289,16 @@ pub struct EngineState {
     pub panic_armed: bool,
     /// The most recent playback problem (e.g. a file that failed mid-stream).
     pub last_error: Option<String>,
+    /// Random-interval layers that are running.
+    pub emitters: Vec<EmitterState>,
+    /// The scene applied last, until something stops everything.
+    pub scene: Option<SceneState>,
+    /// Music is lowered right now because a ducking sound is playing.
+    pub ducked: bool,
+    pub duck_db: f32,
+    /// Peak level since the last update, 0 to 1 and beyond: the four
+    /// channels in order, then the master.
+    pub levels: [f32; 5],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -241,6 +342,12 @@ impl Handle {
             Handle::Streaming(h) => h.pop_error().map(|e| e.to_string()),
         }
     }
+    fn set_volume(&mut self, db: f32, tween: Tween) {
+        match self {
+            Handle::Static(h) => h.set_volume(db, tween),
+            Handle::Streaming(h) => h.set_volume(db, tween),
+        }
+    }
     /// Repeats the whole sound, or lets it run to its end.
     fn set_repeat(&mut self, on: bool) {
         let region = on.then(|| Region::from(..));
@@ -265,6 +372,7 @@ struct ActiveSound {
     stopping: bool,
     /// The stream broke; never put this sound back in the queue.
     failed: bool,
+    duck: bool,
     handle: Handle,
     /// Kept so a finished music track can rejoin a repeating queue.
     request: PlayRequest,
@@ -274,6 +382,42 @@ struct Queued {
     id: u64,
     looping: bool,
     request: PlayRequest,
+}
+
+struct Emitter {
+    id: u64,
+    request: EmitterRequest,
+    next_at: Instant,
+    last: Option<usize>,
+}
+
+/// Measures the peak level passing through a track.
+struct Meter(Arc<AtomicU32>);
+
+struct MeterBuilder;
+
+impl EffectBuilder for MeterBuilder {
+    type Handle = Arc<AtomicU32>;
+    fn build(self) -> (Box<dyn Effect>, Self::Handle) {
+        let peak = Arc::new(AtomicU32::new(0));
+        (Box::new(Meter(peak.clone())), peak)
+    }
+}
+
+impl Effect for Meter {
+    fn process(&mut self, input: &mut [Frame], _dt: f64, _info: &Info) {
+        let mut peak = f32::from_bits(self.0.load(Ordering::Relaxed));
+        for frame in input.iter() {
+            peak = peak.max(frame.left.abs()).max(frame.right.abs());
+        }
+        self.0.store(peak.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Reads a meter and resets it, rounded so tiny changes do not count.
+fn take_level(meter: &AtomicU32) -> f32 {
+    let peak = f32::from_bits(meter.swap(0, Ordering::Relaxed));
+    (peak * 100.0).round() / 100.0
 }
 
 // Volume fades are linear in decibels, so a plain linear tween would spend
@@ -310,7 +454,17 @@ fn ms(v: u32) -> Duration {
 /// The mixer: four channels feeding a master, and the sounds on them.
 pub struct Mixer<B: Backend = DefaultBackend> {
     manager: AudioManager<B>,
+    /// Everything passes through this track on its way out: the master.
+    bus: TrackHandle,
     tracks: Vec<TrackHandle>,
+    meters: Vec<Arc<AtomicU32>>,
+    levels: [f32; 5],
+    emitters: Vec<Emitter>,
+    scene: Option<SceneState>,
+    ducked: bool,
+    /// Short sounds decoded ahead of time, for instant starts.
+    cache: HashMap<PathBuf, StaticSoundData>,
+    cache_order: VecDeque<PathBuf>,
     settings: MixerSettings,
     sounds: Vec<ActiveSound>,
     /// Music tracks waiting for their turn.
@@ -323,21 +477,28 @@ pub struct Mixer<B: Backend = DefaultBackend> {
 impl<B: Backend> Mixer<B> {
     pub fn new(mut manager: AudioManager<B>, settings: MixerSettings) -> Result<Self> {
         let settings = settings.sanitized();
+        let limit = |e: kira::ResourceLimitReached| Error::Playback(e.to_string());
+        let mut meters = Vec::with_capacity(5);
+        let mut bus_builder = TrackBuilder::new().volume(fader_to_db(settings.master_volume));
+        let master_meter = bus_builder.add_effect(MeterBuilder);
+        let mut bus = manager.add_sub_track(bus_builder).map_err(limit)?;
         let mut tracks = Vec::with_capacity(4);
         for channel in Channel::ALL {
-            let c = settings.channels[channel.index()];
-            let volume = if c.muted { Decibels::SILENCE.0 } else { fader_to_db(c.volume) };
-            tracks.push(
-                manager
-                    .add_sub_track(TrackBuilder::new().volume(volume))
-                    .map_err(|e| Error::Playback(e.to_string()))?,
-            );
+            let mut builder = TrackBuilder::new().volume(channel_db(&settings, channel, false));
+            meters.push(builder.add_effect(MeterBuilder));
+            tracks.push(bus.add_sub_track(builder).map_err(limit)?);
         }
-        manager
-            .main_track()
-            .set_volume(fader_to_db(settings.master_volume), Tween::default());
+        meters.push(master_meter);
         Ok(Self {
             manager,
+            bus,
+            meters,
+            levels: [0.0; 5],
+            emitters: Vec::new(),
+            scene: None,
+            ducked: false,
+            cache: HashMap::new(),
+            cache_order: VecDeque::new(),
             tracks,
             settings,
             sounds: Vec::new(),
@@ -374,8 +535,9 @@ impl<B: Backend> Mixer<B> {
             self.refresh_repeats();
             return Ok(id);
         }
-        self.start(id, req)?;
+        self.start(id, req, None)?;
         self.refresh_repeats();
+        self.refresh_duck();
         Ok(id)
     }
 
@@ -390,15 +552,23 @@ impl<B: Backend> Mixer<B> {
         self.settings.channels[Channel::Music.index()].loop_queue
     }
 
-    fn start(&mut self, id: u64, req: PlayRequest) -> Result<()> {
+    /// `fade` overrides the channel's fade time (a scene's transition).
+    fn start(&mut self, id: u64, req: PlayRequest, fade: Option<Duration>) -> Result<()> {
         let channel = req.channel;
-        let fade = ms(self.settings.channels[channel.index()].fade_ms);
+        let fade = fade.unwrap_or(ms(self.settings.channels[channel.index()].fade_ms));
         let looping = req.looping.unwrap_or(channel.loops_by_default());
         let repeating = match channel {
             Channel::Music => looping || (self.loop_queue() && self.queue.is_empty()),
             _ => looping,
         };
-        let one_shot = matches!(channel, Channel::Sfx | Channel::Stingers);
+        // An ambience sound that does not repeat is an occasional one-off
+        // (a random-interval layer), so it starts like an effect.
+        let one_shot = matches!(channel, Channel::Sfx | Channel::Stingers)
+            || (channel == Channel::Ambience && !looping);
+        let duck = req.duck.unwrap_or(channel == Channel::Stingers);
+        let volume = req.gain_db + req.trim_db;
+        let rate = if req.rate > 0.0 { req.rate } else { 1.0 };
+        let pan = Panning(req.pan.clamp(-1.0, 1.0));
 
         // Crossfade when other music is sounding (playing or fading out);
         // otherwise the track starts promptly.
@@ -407,17 +577,26 @@ impl<B: Backend> Mixer<B> {
         let fade_in_tween = match channel {
             Channel::Music if over_music => Some(fade_in(fade)),
             Channel::Music => Some(fade_in(Duration::from_millis(80))),
-            Channel::Ambience => Some(fade_in(fade)),
-            Channel::Sfx | Channel::Stingers => None,
+            Channel::Ambience if !one_shot => Some(fade_in(fade)),
+            _ => None,
         };
 
         let load_err = |e: FromFileError| Error::Playback(format!("{}: {e}", req.name));
         let in_memory = one_shot && req.duration_ms.is_some_and(|d| d <= STATIC_MAX_MS);
         let track = &mut self.tracks[channel.index()];
         let handle = if in_memory {
-            let mut data = StaticSoundData::from_file(&req.path)
-                .map_err(load_err)?
-                .volume(req.gain_db)
+            let cached = match self.cache.get(&req.path) {
+                Some(data) => data.clone(),
+                None => {
+                    let data = StaticSoundData::from_file(&req.path).map_err(load_err)?;
+                    remember(&mut self.cache, &mut self.cache_order, req.path.clone(), data.clone());
+                    data
+                }
+            };
+            let mut data = cached
+                .volume(volume)
+                .playback_rate(rate)
+                .panning(pan)
                 .fade_in_tween(fade_in_tween);
             if repeating {
                 data = data.loop_region(..);
@@ -430,7 +609,9 @@ impl<B: Backend> Mixer<B> {
         } else {
             let mut data = StreamingSoundData::from_file(&req.path)
                 .map_err(load_err)?
-                .volume(req.gain_db)
+                .volume(volume)
+                .playback_rate(rate)
+                .panning(pan)
                 .fade_in_tween(fade_in_tween);
             if repeating {
                 data = data.loop_region(..);
@@ -463,6 +644,7 @@ impl<B: Backend> Mixer<B> {
             repeating,
             stopping: false,
             failed: false,
+            duck,
             handle,
             request: req,
         });
@@ -496,7 +678,7 @@ impl<B: Backend> Mixer<B> {
             let mut request = next.request;
             request.looping = Some(next.looping);
             request.interrupt = false;
-            if let Err(e) = self.start(next.id, request) {
+            if let Err(e) = self.start(next.id, request, None) {
                 // Skip a track that cannot be read and try the one after.
                 self.last_error = Some(e.to_string());
             }
@@ -569,8 +751,180 @@ impl<B: Backend> Mixer<B> {
             s.stopping = true;
         } else {
             self.queue.retain(|q| q.id != id);
+            self.emitters.retain(|e| e.id != id);
         }
         self.advance_music();
+    }
+
+    /// Sets the level of one playing sound (a pad's or layer's own volume).
+    pub fn set_sound_trim(&mut self, id: u64, trim_db: f32) {
+        if let Some(s) = self.sounds.iter_mut().find(|s| s.id == id && !s.stopping) {
+            let trim_db = trim_db.clamp(-60.0, 12.0);
+            s.request.trim_db = trim_db;
+            s.handle.set_volume(s.request.gain_db + trim_db, smooth());
+        }
+    }
+
+    /// Keeps a decoded copy of a short sound so it starts instantly.
+    pub fn cache_sound(&mut self, path: PathBuf, data: StaticSoundData) {
+        remember(&mut self.cache, &mut self.cache_order, path, data);
+    }
+
+    pub fn is_cached(&self, path: &PathBuf) -> bool {
+        self.cache.contains_key(path)
+    }
+
+    // ---- random-interval layers ------------------------------------------
+
+    /// Starts a layer that plays one of its sounds every so often.
+    pub fn add_emitter(&mut self, request: EmitterRequest) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        // The first one comes soon, so the GM hears that it works.
+        let first = fastrand::u32(300..=request.min_ms.clamp(301, 4000));
+        self.emitters.push(Emitter {
+            id,
+            request,
+            next_at: Instant::now() + ms(first),
+            last: None,
+        });
+        id
+    }
+
+    fn run_emitters(&mut self) {
+        let now = Instant::now();
+        let mut due = Vec::new();
+        for e in &mut self.emitters {
+            if now < e.next_at || e.request.sounds.is_empty() {
+                continue;
+            }
+            let count = e.request.sounds.len();
+            let mut pick = fastrand::usize(..count);
+            if count > 1 && Some(pick) == e.last {
+                pick = (pick + 1) % count; // never the same one twice running
+            }
+            e.last = Some(pick);
+            let (lo, hi) = (e.request.min_ms.max(50), e.request.max_ms.max(e.request.min_ms).max(50));
+            e.next_at = now + ms(fastrand::u32(lo..=hi));
+            let mut play = e.request.sounds[pick].clone();
+            play.channel = Channel::Ambience;
+            play.looping = Some(false);
+            play.interrupt = false;
+            play.tag = e.request.tag.clone();
+            if e.request.random_pan {
+                play.pan = fastrand::f32() * 1.6 - 0.8;
+            }
+            due.push(play);
+        }
+        for play in due {
+            let id = self.next_id;
+            self.next_id += 1;
+            if let Err(e) = self.start(id, play, None) {
+                self.last_error = Some(e.to_string());
+            }
+        }
+    }
+
+    // ---- scenes ----------------------------------------------------------
+
+    /// Moves the whole soundscape to a scene over its transition time.
+    ///
+    /// Ambience layers the old and new scene share keep playing without a
+    /// restart; the rest crossfade, so there is never a gap.
+    pub fn apply_scene(&mut self, scene: SceneRequest) {
+        let fade = ms(scene.transition_ms);
+        let mut wanted: Vec<Option<PlayRequest>> = scene.layers.into_iter().map(Some).collect();
+
+        for s in self.sounds.iter_mut().filter(|s| s.channel == Channel::Ambience && !s.stopping) {
+            let keep = s.looping
+                .then(|| wanted.iter().position(|w| w.as_ref().is_some_and(|w| w.asset_id == s.asset_id)))
+                .flatten();
+            match keep {
+                Some(at) => {
+                    let layer = wanted[at].take().unwrap();
+                    s.request.trim_db = layer.trim_db;
+                    s.request.tag = layer.tag;
+                    s.handle.set_volume(s.request.gain_db + layer.trim_db, fade_in(fade));
+                }
+                None => {
+                    s.handle.stop(fade_out(fade));
+                    s.stopping = true;
+                }
+            }
+        }
+        for mut layer in wanted.into_iter().flatten() {
+            layer.channel = Channel::Ambience;
+            layer.looping = Some(true);
+            let id = self.next_id;
+            self.next_id += 1;
+            if let Err(e) = self.start(id, layer, Some(fade)) {
+                self.last_error = Some(e.to_string());
+            }
+        }
+
+        self.emitters.clear();
+        for emitter in scene.emitters {
+            self.add_emitter(emitter);
+        }
+
+        match scene.music {
+            SceneMusic::Keep => {}
+            SceneMusic::Silence => self.stop_channel(Channel::Music, Some(scene.transition_ms)),
+            SceneMusic::Tracks(tracks) => {
+                let mut tracks: VecDeque<PlayRequest> = tracks.into();
+                let current = self
+                    .sounds
+                    .iter()
+                    .find(|s| s.channel == Channel::Music && !s.stopping)
+                    .map(|s| s.asset_id);
+                self.queue.clear();
+                if let Some(mut first) = tracks.pop_front() {
+                    if current != Some(first.asset_id) {
+                        first.channel = Channel::Music;
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        if let Err(e) = self.start(id, first, Some(fade)) {
+                            self.last_error = Some(e.to_string());
+                        }
+                    }
+                }
+                for mut track in tracks {
+                    track.channel = Channel::Music;
+                    let looping = track.looping.unwrap_or(false);
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    self.queue.push_back(Queued { id, looping, request: track });
+                }
+            }
+        }
+        self.scene = Some(SceneState { id: scene.id, name: scene.name });
+        self.refresh_repeats();
+        self.refresh_duck();
+    }
+
+    // ---- ducking and solo ------------------------------------------------
+
+    /// Lowers the music while a ducking sound plays, and brings it back.
+    fn refresh_duck(&mut self) {
+        let ducked = self.sounds.iter().any(|s| s.duck && !s.stopping);
+        if ducked != self.ducked {
+            self.ducked = ducked;
+            let db = channel_db(&self.settings, Channel::Music, ducked);
+            let tween = if ducked { fade_out(DUCK_ATTACK) } else { fade_in(DUCK_RELEASE) };
+            self.tracks[Channel::Music.index()].set_volume(db, tween);
+        }
+    }
+
+    pub fn set_duck_db(&mut self, db: f32) {
+        self.settings.duck_db = db.clamp(-40.0, 0.0);
+        self.apply_channel(Channel::Music);
+    }
+
+    pub fn set_channel_solo(&mut self, channel: Channel, solo: bool) {
+        self.settings.channels[channel.index()].solo = solo;
+        for c in Channel::ALL {
+            self.apply_channel(c);
+        }
     }
 
     /// Fades out everything on a channel. For music this also empties the
@@ -578,6 +932,9 @@ impl<B: Backend> Mixer<B> {
     pub fn stop_channel(&mut self, channel: Channel, fade_ms: Option<u32>) {
         if channel == Channel::Music {
             self.queue.clear();
+        }
+        if channel == Channel::Ambience {
+            self.emitters.clear();
         }
         let fade = fade_ms.unwrap_or(self.settings.channels[channel.index()].fade_ms);
         for s in self.sounds.iter_mut().filter(|s| s.channel == channel) {
@@ -601,15 +958,14 @@ impl<B: Backend> Mixer<B> {
     }
 
     fn apply_channel(&mut self, channel: Channel) {
-        let c = self.settings.channels[channel.index()];
-        let db = if c.muted { Decibels::SILENCE.0 } else { fader_to_db(c.volume) };
+        let ducked = channel == Channel::Music && self.ducked;
+        let db = channel_db(&self.settings, channel, ducked);
         self.tracks[channel.index()].set_volume(db, smooth());
     }
 
     pub fn set_master_volume(&mut self, volume: f32) {
         self.settings.master_volume = clamp_unit(volume);
-        self.manager
-            .main_track()
+        self.bus
             .set_volume(fader_to_db(self.settings.master_volume), smooth());
     }
 
@@ -617,6 +973,8 @@ impl<B: Backend> Mixer<B> {
     /// while that fade is still running cuts instantly.
     pub fn panic(&mut self) -> PanicOutcome {
         self.queue.clear();
+        self.emitters.clear();
+        self.scene = None;
         if self.sounds.is_empty() {
             self.panic_armed = false;
             return PanicOutcome::Idle;
@@ -658,6 +1016,11 @@ impl<B: Backend> Mixer<B> {
             self.requeue(request, looping);
         }
         self.advance_music();
+        self.run_emitters();
+        self.refresh_duck();
+        for (level, meter) in self.levels.iter_mut().zip(&self.meters) {
+            *level = take_level(meter);
+        }
         if self.sounds.is_empty() {
             self.panic_armed = false;
         }
@@ -701,11 +1064,74 @@ impl<B: Backend> Mixer<B> {
                     duration_ms: s.duration_ms,
                     looping: s.looping,
                     stopping: s.stopping,
+                    trim_db: s.request.trim_db,
+                    tag: s.request.tag.clone(),
                 })
                 .collect(),
             panic_armed: self.panic_armed,
             last_error: self.last_error.clone(),
+            emitters: self
+                .emitters
+                .iter()
+                .map(|e| EmitterState {
+                    id: e.id,
+                    name: e.request.name.clone(),
+                    min_ms: e.request.min_ms,
+                    max_ms: e.request.max_ms,
+                    tag: e.request.tag.clone(),
+                })
+                .collect(),
+            scene: self.scene.clone(),
+            ducked: self.ducked,
+            duck_db: self.settings.duck_db,
+            levels: self.levels,
         }
+    }
+}
+
+/// A channel track's volume in dB: its fader, unless it is muted or
+/// another channel is soloed, and lowered while ducked.
+fn channel_db(settings: &MixerSettings, channel: Channel, ducked: bool) -> f32 {
+    let c = settings.channels[channel.index()];
+    let any_solo = settings.channels.iter().any(|c| c.solo);
+    if c.muted || (any_solo && !c.solo) {
+        return Decibels::SILENCE.0;
+    }
+    fader_to_db(c.volume) + if ducked { settings.duck_db } else { 0.0 }
+}
+
+/// Adds a decoded sound to the cache, dropping the oldest ones when full.
+fn remember(
+    cache: &mut HashMap<PathBuf, StaticSoundData>,
+    order: &mut VecDeque<PathBuf>,
+    path: PathBuf,
+    data: StaticSoundData,
+) {
+    if cache.insert(path.clone(), data).is_none() {
+        order.push_back(path);
+    }
+    let mut total: usize = cache.values().map(|d| d.frames.len()).sum();
+    while total > CACHE_MAX_FRAMES && order.len() > 1 {
+        if let Some(oldest) = order.pop_front() {
+            if let Some(dropped) = cache.remove(&oldest) {
+                total -= dropped.frames.len();
+            }
+        }
+    }
+}
+
+/// Decodes a short sound ahead of time. Run this off the engine thread.
+pub fn decode(path: &std::path::Path) -> Result<StaticSoundData> {
+    StaticSoundData::from_file(path).map_err(|e| Error::Playback(format!("{}: {e}", path.display())))
+}
+
+/// A decoded sound on its way into the cache. Printed without its samples.
+#[derive(Clone)]
+pub struct Decoded(pub PathBuf, pub StaticSoundData);
+
+impl std::fmt::Debug for Decoded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?} ({} frames)", self.0, self.1.frames.len())
     }
 }
 
@@ -720,6 +1146,7 @@ fn channel_states(settings: &MixerSettings) -> Vec<ChannelState> {
                 muted: c.muted,
                 fade_ms: c.fade_ms,
                 loop_queue: c.loop_queue,
+                solo: c.solo,
                 queue: Vec::new(),
             }
         })
@@ -746,6 +1173,13 @@ pub enum Command {
     NextTrack,
     /// Crossfade to this queued music track now.
     PlayQueuedNow { id: u64 },
+    SetSoundTrim { id: u64, trim_db: f32 },
+    SetChannelSolo { channel: Channel, solo: bool },
+    SetDuckDb { db: f32 },
+    /// Keep a decoded short sound ready for an instant start.
+    Cache(Decoded),
+    AddEmitter(EmitterRequest),
+    ApplyScene(SceneRequest),
     Panic,
     /// Try to open the audio device again right now.
     RetryDevice,
@@ -933,6 +1367,39 @@ impl Engine {
         self.send(Command::PlayQueuedNow { id }).map(|_| ())
     }
 
+    pub fn set_sound_trim(&self, id: u64, trim_db: f32) -> Result<()> {
+        self.send(Command::SetSoundTrim { id, trim_db }).map(|_| ())
+    }
+
+    pub fn set_channel_solo(&self, channel: Channel, solo: bool) -> Result<()> {
+        self.send(Command::SetChannelSolo { channel, solo }).map(|_| ())
+    }
+
+    pub fn set_duck_db(&self, db: f32) -> Result<()> {
+        self.send(Command::SetDuckDb { db }).map(|_| ())
+    }
+
+    /// Decodes short sounds here, on the caller's thread, and hands them
+    /// to the engine so pads and stingers start without a disk read.
+    pub fn preload(&self, paths: &[PathBuf]) {
+        for path in paths {
+            if let Ok(data) = decode(path) {
+                let _ = self.send(Command::Cache(Decoded(path.clone(), data)));
+            }
+        }
+    }
+
+    pub fn add_emitter(&self, request: EmitterRequest) -> Result<u64> {
+        match self.send(Command::AddEmitter(request))? {
+            Reply::Started(id) => Ok(id),
+            _ => unreachable!("add emitter always replies with an id"),
+        }
+    }
+
+    pub fn apply_scene(&self, scene: SceneRequest) -> Result<()> {
+        self.send(Command::ApplyScene(scene)).map(|_| ())
+    }
+
     pub fn panic(&self) -> Result<PanicOutcome> {
         match self.send(Command::Panic)? {
             Reply::Panic(outcome) => Ok(outcome),
@@ -1012,6 +1479,27 @@ fn run<B: Backend>(mixer: &mut Mixer<B>, command: Command) -> Result<Reply> {
             mixer.play_queued_now(id);
             Ok(Reply::Done)
         }
+        Command::SetSoundTrim { id, trim_db } => {
+            mixer.set_sound_trim(id, trim_db);
+            Ok(Reply::Done)
+        }
+        Command::SetChannelSolo { channel, solo } => {
+            mixer.set_channel_solo(channel, solo);
+            Ok(Reply::Done)
+        }
+        Command::SetDuckDb { db } => {
+            mixer.set_duck_db(db);
+            Ok(Reply::Done)
+        }
+        Command::Cache(Decoded(path, data)) => {
+            mixer.cache_sound(path, data);
+            Ok(Reply::Done)
+        }
+        Command::AddEmitter(request) => Ok(Reply::Started(mixer.add_emitter(request))),
+        Command::ApplyScene(scene) => {
+            mixer.apply_scene(scene);
+            Ok(Reply::Done)
+        }
         Command::Panic => Ok(Reply::Panic(mixer.panic())),
         Command::RetryDevice => Ok(Reply::Done),
     }
@@ -1022,10 +1510,10 @@ fn run_offline(
     command: Command,
     device_error: &Option<String>,
 ) -> Result<Reply> {
+    let no_device =
+        || Error::NoDevice(device_error.clone().unwrap_or_else(|| "no output device".into()));
     match command {
-        Command::Play(_) => Err(Error::NoDevice(
-            device_error.clone().unwrap_or_else(|| "no output device".into()),
-        )),
+        Command::Play(_) => Err(no_device()),
         Command::SetChannelVolume { channel, volume } => {
             settings.channels[channel.index()].volume = clamp_unit(volume);
             Ok(Reply::Done)
@@ -1046,8 +1534,19 @@ fn run_offline(
             settings.channels[Channel::Music.index()].loop_queue = on;
             Ok(Reply::Done)
         }
+        Command::SetChannelSolo { channel, solo } => {
+            settings.channels[channel.index()].solo = solo;
+            Ok(Reply::Done)
+        }
+        Command::SetDuckDb { db } => {
+            settings.duck_db = db.clamp(-40.0, 0.0);
+            Ok(Reply::Done)
+        }
+        Command::AddEmitter(_) | Command::ApplyScene(_) => Err(no_device()),
         Command::Panic => Ok(Reply::Panic(PanicOutcome::Idle)),
         Command::StopSound { .. }
+        | Command::SetSoundTrim { .. }
+        | Command::Cache(_)
         | Command::StopChannel { .. }
         | Command::SetSoundLooping { .. }
         | Command::NextTrack
@@ -1071,6 +1570,11 @@ fn current_state<B: Backend>(
             sounds: Vec::new(),
             panic_armed: false,
             last_error: None,
+            emitters: Vec::new(),
+            scene: None,
+            ducked: false,
+            duck_db: settings.duck_db,
+            levels: [0.0; 5],
         },
     }
 }
@@ -1147,7 +1651,7 @@ mod tests {
             gain_db: 0.0,
             duration_ms: Some(duration_ms),
             looping: None,
-            interrupt: false,
+            ..Default::default()
         }
     }
 
@@ -1159,6 +1663,7 @@ mod tests {
     fn music(m: &Mixer<MockBackend>) -> ChannelState {
         m.state().channels[Channel::Music.index()].clone()
     }
+    use music as music_state;
 
     /// Renders about `millis` of audio, giving streams real time to decode.
     fn play_for(m: &mut Mixer<MockBackend>, millis: u64) {
@@ -1421,6 +1926,207 @@ mod tests {
         render_until(&mut m, |m| m.state().sounds.first().is_some_and(|s| s.id == good));
         assert!(m.state().last_error.is_some());
         assert!(music(&m).queue.is_empty());
+    }
+
+    fn count_on(m: &Mixer<MockBackend>, channel: Channel, stopping: bool) -> usize {
+        m.state().sounds.iter().filter(|s| s.channel == channel && s.stopping == stopping).count()
+    }
+
+    #[test]
+    fn stingers_duck_the_music_and_it_recovers() {
+        let f = files();
+        let mut m = mixer();
+        m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        m.play(req(&f.short, Channel::Sfx, 300)).unwrap();
+        assert!(!m.state().ducked, "plain effects do not duck");
+
+        m.play(req(&f.short, Channel::Stingers, 300)).unwrap();
+        assert!(m.state().ducked);
+        render_until(&mut m, |m| m.sound_count() == 1);
+        assert!(!m.state().ducked, "music comes back when the stinger ends");
+
+        // Any sound can ask for it, and a stinger can decline.
+        let mut pad = req(&f.short, Channel::Sfx, 300);
+        pad.duck = Some(true);
+        m.play(pad).unwrap();
+        assert!(m.state().ducked);
+        render_until(&mut m, |m| m.sound_count() == 1);
+        let mut quiet = req(&f.short, Channel::Stingers, 300);
+        quiet.duck = Some(false);
+        m.play(quiet).unwrap();
+        assert!(!m.state().ducked);
+    }
+
+    #[test]
+    fn meters_follow_the_sound_and_solo_silences_the_rest() {
+        let f = files();
+        let mut m = mixer();
+        play_for(&mut m, 60);
+        assert_eq!(m.state().levels, [0.0; 5]);
+
+        m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        play_for(&mut m, 400);
+        let levels = m.state().levels;
+        assert!(levels[Channel::Music.index()] > 0.05, "{levels:?}");
+        assert!(levels[4] > 0.02, "master shows the mix: {levels:?}");
+        assert_eq!(levels[Channel::Sfx.index()], 0.0);
+
+        // Solo another channel: the music still runs but nothing reaches the master.
+        m.set_channel_solo(Channel::Ambience, true);
+        assert!(m.state().channels[Channel::Ambience.index()].solo);
+        play_for(&mut m, 300);
+        let levels = m.state().levels;
+        assert!(levels[Channel::Music.index()] > 0.05);
+        assert_eq!(levels[4], 0.0, "{levels:?}");
+
+        m.set_channel_solo(Channel::Ambience, false);
+        play_for(&mut m, 300);
+        assert!(m.state().levels[4] > 0.02);
+    }
+
+    #[test]
+    fn a_sound_has_its_own_level_and_short_sounds_are_cached() {
+        let f = files();
+        let mut m = mixer();
+        let mut pad = req(&f.short, Channel::Sfx, 300);
+        pad.trim_db = -6.0;
+        pad.rate = 1.2;
+        pad.pan = -0.5;
+        pad.tag = Some("pad:1:0".into());
+        assert!(!m.is_cached(&f.short));
+        let id = m.play(pad.clone()).unwrap();
+        assert!(m.is_cached(&f.short), "decoded once, kept for next time");
+        let s = m.state();
+        assert_eq!(s.sounds[0].trim_db, -6.0);
+        assert_eq!(s.sounds[0].tag.as_deref(), Some("pad:1:0"));
+        m.set_sound_trim(id, -12.0);
+        assert_eq!(m.state().sounds[0].trim_db, -12.0);
+
+        // A cached pad starts well inside the 30 ms budget.
+        let started = Instant::now();
+        m.play(pad).unwrap();
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(30), "pad took {took:?}");
+    }
+
+    #[test]
+    fn random_interval_layers_keep_firing_until_stopped() {
+        let f = files();
+        let mut m = mixer();
+        let id = m.add_emitter(EmitterRequest {
+            name: "Drips".into(),
+            sounds: vec![req(&f.short, Channel::Ambience, 300)],
+            min_ms: 80,
+            max_ms: 120,
+            random_pan: true,
+            tag: None,
+        });
+        assert_eq!(m.state().emitters.len(), 1);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            play_for(&mut m, 20);
+            thread::sleep(Duration::from_millis(18));
+            for s in m.state().sounds {
+                assert!(!s.looping, "each occurrence plays once");
+                seen.insert(s.id);
+            }
+        }
+        assert!(seen.len() >= 3, "fired {} times in about a second", seen.len());
+
+        m.stop_sound(id, None);
+        assert!(m.state().emitters.is_empty());
+        render_until(&mut m, |m| m.sound_count() == 0);
+
+        // Stopping the ambience channel also ends the layers.
+        m.add_emitter(EmitterRequest {
+            name: "Drips".into(),
+            sounds: vec![req(&f.short, Channel::Ambience, 300)],
+            min_ms: 80,
+            max_ms: 120,
+            random_pan: false,
+            tag: None,
+        });
+        m.stop_channel(Channel::Ambience, None);
+        assert!(m.state().emitters.is_empty());
+    }
+
+    fn layer(path: &PathBuf, asset_id: i64, trim_db: f32) -> PlayRequest {
+        PlayRequest { asset_id, trim_db, ..req(path, Channel::Ambience, 30_000) }
+    }
+
+    #[test]
+    fn scenes_switch_without_a_gap() {
+        let f = files();
+        let mut m = mixer();
+        let music = |asset_id| PlayRequest { asset_id, ..req(&f.long, Channel::Music, 30_000) };
+
+        m.apply_scene(SceneRequest {
+            id: 1,
+            name: "Tavern".into(),
+            transition_ms: 300,
+            music: SceneMusic::Tracks(vec![music(100), music(101)]),
+            layers: (1..=4).map(|i| layer(&f.long, i, 0.0)).collect(),
+            emitters: vec![],
+        });
+        assert_eq!(count_on(&m, Channel::Ambience, false), 4);
+        assert_eq!(count_on(&m, Channel::Music, false), 1);
+        assert_eq!(music_state(&m).queue.len(), 1);
+        assert_eq!(m.state().scene.unwrap().name, "Tavern");
+        play_for(&mut m, 400);
+        let kept: Vec<u64> = m.state().sounds.iter().filter(|s| s.asset_id == 3 || s.asset_id == 4).map(|s| s.id).collect();
+
+        // Two layers stay, two go, two arrive; the music changes.
+        m.apply_scene(SceneRequest {
+            id: 2,
+            name: "Storm".into(),
+            transition_ms: 300,
+            music: SceneMusic::Tracks(vec![music(200)]),
+            layers: vec![layer(&f.long, 3, -6.0), layer(&f.long, 4, 0.0), layer(&f.long, 5, 0.0), layer(&f.long, 6, 0.0)],
+            emitters: vec![EmitterRequest {
+                name: "Thunder".into(),
+                sounds: vec![req(&f.short, Channel::Ambience, 300)],
+                min_ms: 20_000,
+                max_ms: 90_000,
+                random_pan: true,
+                tag: None,
+            }],
+        });
+        let s = m.state();
+        // During the transition old and new sound together: never fewer than four.
+        assert_eq!(count_on(&m, Channel::Ambience, false), 4);
+        assert_eq!(count_on(&m, Channel::Ambience, true), 2);
+        for id in &kept {
+            let layer = s.sounds.iter().find(|x| x.id == *id).unwrap();
+            assert!(!layer.stopping, "shared layers are not restarted");
+        }
+        assert_eq!(s.sounds.iter().find(|x| x.asset_id == 3).unwrap().trim_db, -6.0);
+        assert_eq!(count_on(&m, Channel::Music, true), 1);
+        assert_eq!(count_on(&m, Channel::Music, false), 1);
+        assert!(music_state(&m).queue.is_empty());
+        assert_eq!(s.emitters.len(), 1);
+        assert_eq!(s.scene.unwrap().id, 2);
+
+        render_until(&mut m, |m| m.sound_count() == 5);
+
+        // Same first track: the music carries on untouched. Keep: likewise.
+        let playing = m.state().sounds.iter().find(|s| s.channel == Channel::Music).unwrap().id;
+        for music in [SceneMusic::Tracks(vec![music(200), music(201)]), SceneMusic::Keep] {
+            m.apply_scene(SceneRequest { id: 3, name: "Calm".into(), transition_ms: 100, music, ..Default::default() });
+            let s = m.state();
+            let track = s.sounds.iter().find(|s| s.id == playing).unwrap();
+            assert!(!track.stopping);
+        }
+        assert_eq!(music_state(&m).queue.len(), 1, "keep leaves the queue the earlier scene set");
+        assert!(m.state().emitters.is_empty(), "a scene without random layers ends the old ones");
+        assert_eq!(count_on(&m, Channel::Ambience, false), 0);
+
+        m.apply_scene(SceneRequest { id: 4, name: "Silence".into(), transition_ms: 100, music: SceneMusic::Silence, ..Default::default() });
+        render_until(&mut m, |m| m.sound_count() == 0);
+
+        m.apply_scene(SceneRequest { id: 5, name: "X".into(), ..Default::default() });
+        m.play(req(&f.long, Channel::Sfx, 30_000)).unwrap();
+        m.panic();
+        assert!(m.state().scene.is_none(), "panic clears the active scene");
     }
 
     #[test]

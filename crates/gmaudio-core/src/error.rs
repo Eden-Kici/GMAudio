@@ -17,6 +17,9 @@ pub enum Error {
     /// The detail is kept for logs; the message is what the GM reads.
     #[error("No speakers or headphones found, so nothing can play yet.")]
     NoDevice(String),
+    /// A sound that cannot be played, said in words for the GM.
+    #[error("{0}")]
+    Unplayable(String),
     #[error("playback failed: {0}")]
     Playback(String),
     #[error("the audio engine has stopped")]

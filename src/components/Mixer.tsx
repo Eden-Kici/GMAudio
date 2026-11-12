@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api, CHANNELS, type Channel, type ChannelState, type QueuedState, type SoundState } from "../api";
+import { api, CHANNELS, type Channel, type ChannelState, type EmitterState, type QueuedState, type SoundState } from "../api";
+import { useDocs } from "../docs";
 import { formatTime } from "../format";
 import { useStore } from "../store";
 import { DRAG_TYPE } from "./Browser";
@@ -16,6 +17,7 @@ function fadeLabel(ms: number): string {
 export function Mixer() {
   const channels = useStore((s) => s.engine?.channels);
   const sounds = useStore((s) => s.engine?.sounds);
+  const emitters = useStore((s) => s.engine?.emitters);
 
   return (
     <section aria-label="Mixer" className="grid h-60 shrink-0 grid-cols-4 gap-px border-t border-line bg-line">
@@ -28,6 +30,8 @@ export function Mixer() {
           color={c.color}
           state={channels?.find((x) => x.channel === c.id)}
           sounds={sounds?.filter((s) => s.channel === c.id) ?? []}
+          emitters={c.id === "ambience" ? (emitters ?? []) : []}
+          index={CHANNELS.indexOf(c)}
         />
       ))}
     </section>
@@ -41,9 +45,26 @@ interface StripProps {
   color: string;
   state: ChannelState | undefined;
   sounds: SoundState[];
+  emitters: EmitterState[];
+  index: number;
 }
 
-function Strip({ id, label, hint, color, state, sounds }: StripProps) {
+/** A thin bar showing how loud a channel is right now. */
+function Meter({ index, color }: { index: number; color: string }) {
+  const level = useStore((s) => s.engine?.levels[index] ?? 0);
+  // Peak 0..1 on a dB-like curve, so quiet sounds still show.
+  const width = level <= 0 ? 0 : Math.max(0, Math.min(1, 1 + Math.log10(level) / 2.5));
+  return (
+    <div className="mt-1 h-1 overflow-hidden rounded-full bg-line" aria-hidden>
+      <div className="h-full rounded-full transition-[width] duration-75" style={{ width: `${width * 100}%`, background: level > 0.98 ? "var(--color-danger)" : color }} />
+    </div>
+  );
+}
+
+function Strip({ id, label, hint, color, state, sounds, emitters, index }: StripProps) {
+  const advanced = useDocs((s) => s.advanced);
+  const ducked = useStore((s) => id === "music" && (s.engine?.ducked ?? false));
+  const solo = state?.solo ?? false;
   const stopChannel = useStore((s) => s.stopChannel);
   const play = useStore((s) => s.play);
   const dragging = useStore((s) => s.dragging !== null);
@@ -54,7 +75,7 @@ function Strip({ id, label, hint, color, state, sounds }: StripProps) {
   const queue = state?.queue ?? [];
   const loopQueue = state?.loop_queue ?? true;
   const fades = FADES.includes(fade) ? FADES : [...FADES, fade].sort((a, b) => a - b);
-  const busy = sounds.some((s) => !s.stopping) || queue.length > 0;
+  const busy = sounds.some((s) => !s.stopping) || queue.length > 0 || emitters.length > 0;
   const isMusic = id === "music";
 
   return (
@@ -132,6 +153,18 @@ function Strip({ id, label, hint, color, state, sounds }: StripProps) {
         >
           <VolumeIcon muted={muted} />
         </button>
+        {advanced && (
+          <button
+            onClick={() => void api.setChannel(id, { solo: !solo })}
+            aria-pressed={solo}
+            title={solo ? "Solo is on: only soloed channels are heard. Click to turn off." : "Solo: hear only this channel"}
+            className={`flex size-8 shrink-0 items-center justify-center rounded-md text-xs font-bold ${
+              solo ? "bg-accent text-bg" : "text-dim hover:bg-raised hover:text-ink"
+            }`}
+          >
+            S
+          </button>
+        )}
         <Fader
           value={volume}
           onChange={(v) => void api.setChannel(id, { volume: v })}
@@ -143,7 +176,7 @@ function Strip({ id, label, hint, color, state, sounds }: StripProps) {
         <span className="w-9 shrink-0 text-right text-xs tabular-nums text-dim">
           {muted ? "Muted" : `${Math.round(volume * 100)}%`}
         </span>
-        <select
+        {advanced && <select
           value={fade}
           onChange={(e) => void api.setChannel(id, { fadeMs: Number(e.target.value) })}
           title="How long sounds on this channel take to fade in, fade out and crossfade"
@@ -155,16 +188,21 @@ function Strip({ id, label, hint, color, state, sounds }: StripProps) {
               {fadeLabel(ms)}
             </option>
           ))}
-        </select>
+        </select>}
       </div>
+      {advanced && <Meter index={index} color={color} />}
+      {ducked && <p className="mt-1 text-[11px] text-faint">Lowered while a stinger plays</p>}
 
       <div className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto">
-        {sounds.length === 0 && queue.length === 0 ? (
+        {sounds.length === 0 && queue.length === 0 && emitters.length === 0 ? (
           <p className="pt-1 text-xs text-faint">{over ? "Drop to play here" : "Nothing playing"}</p>
         ) : (
           <>
             {sounds.map((s) => (
               <Playing key={s.id} sound={s} color={color} />
+            ))}
+            {emitters.map((e) => (
+              <Emitter key={e.id} emitter={e} />
             ))}
             {queue.length > 0 && <p className="pt-1 text-[11px] font-medium uppercase tracking-wider text-faint">Up next</p>}
             {queue.map((q) => (
@@ -203,6 +241,19 @@ function Playing({ sound, color }: { sound: SoundState; color: string }) {
       <span className="absolute inset-y-0 left-0 opacity-25" style={{ width: `${progress * 100}%`, background: color }} />
       <div className="relative flex h-8 items-center gap-1.5 pl-2.5 pr-1">
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{sound.name}</span>
+        {sound.channel === "ambience" && sound.looping && !sound.stopping && (
+          <input
+            type="range"
+            min={-30}
+            max={6}
+            value={Math.round(sound.trim_db)}
+            onChange={(e) => void api.setSoundTrim(sound.id, Number(e.target.value))}
+            aria-label={`${sound.name} volume`}
+            title="This layer's own volume"
+            className="fader w-16 shrink-0"
+            style={{ "--c": color, "--v": `${((Math.round(sound.trim_db) + 30) / 36) * 100}%`, height: 20 } as React.CSSProperties}
+          />
+        )}
         <span className="shrink-0 text-[11px] tabular-nums text-dim">
           {sound.stopping ? "Fading out" : `${formatTime(sound.position_ms)} / ${formatTime(duration)}`}
         </span>
@@ -217,6 +268,28 @@ function Playing({ sound, color }: { sound: SoundState; color: string }) {
           <StopIcon width={10} height={10} />
         </button>
       </div>
+    </div>
+  );
+}
+
+/** A layer that plays a sound every so often. */
+function Emitter({ emitter }: { emitter: EmitterState }) {
+  const stop = useStore((s) => s.stopSound);
+  const seconds = (ms: number) => Math.round(ms / 1000);
+  return (
+    <div className="flex h-7 items-center gap-1.5 rounded-md border border-dashed border-line pl-2.5 pr-1">
+      <span className="min-w-0 flex-1 truncate text-xs text-dim">{emitter.name}</span>
+      <span className="shrink-0 text-[11px] tabular-nums text-faint">
+        every {seconds(emitter.min_ms)}–{seconds(emitter.max_ms)} s
+      </span>
+      <button
+        onClick={() => void stop(emitter.id)}
+        aria-label={`Stop ${emitter.name}`}
+        title="Stop this occasional sound"
+        className="flex size-6 shrink-0 items-center justify-center rounded text-faint hover:bg-line hover:text-ink"
+      >
+        <StopIcon width={10} height={10} />
+      </button>
     </div>
   );
 }

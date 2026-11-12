@@ -2,9 +2,9 @@ import { api } from "../api";
 import { plural } from "../format";
 import { useStore } from "../store";
 import { Fader } from "./Fader";
-import { StopIcon } from "./icons";
+import { SearchIcon, StopIcon } from "./icons";
 
-export function TopBar() {
+export function TopBar({ onPalette }: { onPalette: () => void }) {
   const master = useStore((s) => s.engine?.master_volume ?? 0.8);
   const armed = useStore((s) => s.engine?.panic_armed ?? false);
   const playing = useStore((s) => (s.engine?.sounds.length ?? 0) > 0);
@@ -20,7 +20,16 @@ export function TopBar() {
 
       <ScanStatusPill />
 
-      <div className="ml-auto flex items-center gap-3">
+      <button
+        onClick={onPalette}
+        title="Find a scene, pad or sound by name and fire it"
+        className="ml-auto flex h-9 items-center gap-2 rounded-lg border border-line px-3 text-xs text-dim hover:border-dim hover:text-ink"
+      >
+        <SearchIcon width={14} height={14} /> Find and play
+        <kbd className="rounded bg-raised px-1.5 py-0.5 text-[11px] font-medium">Ctrl K</kbd>
+      </button>
+
+      <div className="flex items-center gap-3">
         <span className="text-xs font-medium uppercase tracking-wider text-dim">Master</span>
         <Fader
           value={master}

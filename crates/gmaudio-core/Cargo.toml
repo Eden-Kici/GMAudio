@@ -6,6 +6,7 @@ description = "GMAudio library and audio engine (no UI dependencies)"
 
 [dependencies]
 ebur128 = "0.1.11"
+fastrand = "2"
 kira = { version = "0.12.6", default-features = false, features = [
     "cpal",
     "cpal-realtime",

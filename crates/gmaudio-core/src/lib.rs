@@ -9,6 +9,7 @@ pub mod engine;
 pub mod error;
 pub mod library;
 pub mod model;
+pub mod project;
 pub mod search;
 
 pub use error::{Error, Result};
