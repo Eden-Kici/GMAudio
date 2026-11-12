@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, CHANNELS, type Channel, type ChannelState, type EmitterState, type QueuedState, type SoundState } from "../api";
 import { useDocs } from "../docs";
+import { SetPanel } from "./SetsView";
 import { formatTime } from "../format";
 import { useStore } from "../store";
 import { DRAG_TYPE } from "./Browser";
@@ -65,6 +66,7 @@ function Strip({ id, label, hint, color, state, sounds, emitters, index }: Strip
   const advanced = useDocs((s) => s.advanced);
   const ducked = useStore((s) => id === "music" && (s.engine?.ducked ?? false));
   const solo = state?.solo ?? false;
+  const hasSet = useStore((s) => id === "music" && s.engine?.music_set != null);
   const stopChannel = useStore((s) => s.stopChannel);
   const play = useStore((s) => s.play);
   const dragging = useStore((s) => s.dragging !== null);
@@ -75,7 +77,7 @@ function Strip({ id, label, hint, color, state, sounds, emitters, index }: Strip
   const queue = state?.queue ?? [];
   const loopQueue = state?.loop_queue ?? true;
   const fades = FADES.includes(fade) ? FADES : [...FADES, fade].sort((a, b) => a - b);
-  const busy = sounds.some((s) => !s.stopping) || queue.length > 0 || emitters.length > 0;
+  const busy = sounds.some((s) => !s.stopping) || queue.length > 0 || emitters.length > 0 || hasSet;
   const isMusic = id === "music";
 
   return (
@@ -194,7 +196,8 @@ function Strip({ id, label, hint, color, state, sounds, emitters, index }: Strip
       {ducked && <p className="mt-1 text-[11px] text-faint">Lowered while a stinger plays</p>}
 
       <div className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto">
-        {sounds.length === 0 && queue.length === 0 && emitters.length === 0 ? (
+        {hasSet && <SetPanel />}
+        {hasSet && sounds.length === 0 ? null : sounds.length === 0 && queue.length === 0 && emitters.length === 0 ? (
           <p className="pt-1 text-xs text-faint">{over ? "Drop to play here" : "Nothing playing"}</p>
         ) : (
           <>

@@ -12,6 +12,7 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 
 use crate::model::{Analysis, TARGET_LUFS};
+use crate::tempo::OnsetTracker;
 use crate::{Error, Result};
 
 /// How much of the start and end of a file goes into its hash.
@@ -107,6 +108,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     let mut channels = 0u32;
     let mut frames: u64 = 0;
     let mut samples: Vec<f32> = Vec::new();
+    let mut onsets: Option<OnsetTracker> = None;
 
     loop {
         let packet = match format.next_packet() {
@@ -143,6 +145,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                 EbuR128::new(channels, rate, Mode::I | Mode::SAMPLE_PEAK | Mode::HISTOGRAM)
                     .map_err(decode_err)?,
             );
+            onsets = Some(OnsetTracker::new(rate, channels));
         } else if buf_rate != rate || buf_channels != channels {
             // Format changed mid-stream (chained Ogg): measure the first part only.
             break;
@@ -154,6 +157,9 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         if let Some(m) = meter.as_mut() {
             m.add_frames_f32(&samples).map_err(decode_err)?;
         }
+        if let Some(o) = onsets.as_mut() {
+            o.push(&samples);
+        }
     }
 
     let Some(meter) = meter else {
@@ -163,6 +169,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         return Err(Error::Decode("file contains no audio".into()));
     }
 
+    let tempo = onsets.and_then(OnsetTracker::finish);
     let loudness = meter
         .loudness_global()
         .ok()
@@ -178,6 +185,8 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         channels: channels as i64,
         loudness_lufs: loudness.map(|l| (l * 100.0).round() / 100.0),
         gain_db: gain_for(loudness, peak),
+        bpm: tempo.map(|t| t.bpm),
+        beat_offset_ms: tempo.map(|t| t.offset_ms),
     })
 }
 

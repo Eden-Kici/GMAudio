@@ -13,6 +13,7 @@ import {
   Field,
   formatDb,
   HotkeyInput,
+  inputBase,
   inputClass,
   primaryClass,
   Segmented,
@@ -166,14 +167,14 @@ export function BoardsView() {
                   onChange={(e) => void save("board", board.id, { ...board.data, name: e.target.value })}
                   placeholder="Board name"
                   aria-label="Board name"
-                  className={`${inputClass} w-56`}
+                  className={`${inputBase} h-9 w-56`}
                 />
                 <label className="flex items-center gap-2 text-xs text-dim">
                   Pads per row
                   <select
                     value={board.data.columns}
                     onChange={(e) => void save("board", board.id, { ...board.data, columns: Number(e.target.value) })}
-                    className={`${inputClass} w-16`}
+                    className={`${inputBase} h-9 w-16`}
                   >
                     {[3, 4, 5, 6, 8].map((n) => (
                       <option key={n}>{n}</option>

@@ -43,3 +43,17 @@ fn battle_march_stems_are_exactly_the_same_length() {
     // 16 bars of 4/4 at 140 BPM.
     assert!((lengths[0] - 27_429).abs() <= 2, "{lengths:?}");
 }
+
+#[test]
+fn starter_music_tempos_are_detected() {
+    // (file, true tempo). The slow pad pieces may read at double speed.
+    for (name, bpm) in [("Tavern Evening", 100.0), ("Battle March", 140.0), ("Battle March (stems)/Battle March - Drums", 140.0)] {
+        let a = analyze(&pack().join(format!("Music/{name}.ogg"))).unwrap();
+        let found = a.bpm.unwrap_or_else(|| panic!("{name}: no tempo found"));
+        assert!((found - bpm).abs() <= 1.0, "{name}: {found} BPM, expected {bpm}");
+    }
+    for name in ["Rain", "Wind", "River"] {
+        let a = analyze(&pack().join(format!("Ambience/{name}.ogg"))).unwrap();
+        assert_eq!(a.bpm, None, "{name} has no beat");
+    }
+}

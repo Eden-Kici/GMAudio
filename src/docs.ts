@@ -3,22 +3,24 @@
 import { create } from "zustand";
 import { api, events, type Asset, type Doc } from "./api";
 import { message, useStore } from "./store";
-import type { Board, Hotkey, Scene } from "./types";
+import type { Board, Hotkey, MusicSet, Scene } from "./types";
 
-export type View = "library" | "scenes" | "boards" | "settings";
+export type View = "library" | "scenes" | "boards" | "sets" | "settings";
 
 interface Kinds {
   scene: Scene;
   board: Board;
+  set: MusicSet;
 }
 type Kind = keyof Kinds;
 
-const PLURAL: { [K in Kind]: "scenes" | "boards" } = { scene: "scenes", board: "boards" };
+const PLURAL: { [K in Kind]: "scenes" | "boards" | "sets" } = { scene: "scenes", board: "boards", set: "sets" };
 
 interface DocsStore {
   loaded: boolean;
   scenes: Doc<Scene>[];
   boards: Doc<Board>[];
+  sets: Doc<MusicSet>[];
   hotkeys: Hotkey[];
   view: View;
   /** Show every control. Off: only what a new GM needs. */
@@ -45,6 +47,7 @@ export const useDocs = create<DocsStore>((set, get) => ({
   loaded: false,
   scenes: [],
   boards: [],
+  sets: [],
   hotkeys: [],
   view: "library",
   advanced: false,
@@ -52,9 +55,10 @@ export const useDocs = create<DocsStore>((set, get) => ({
 
   load: async () => {
     try {
-      const [scenes, boards, hotkeys, view, advanced] = await Promise.all([
+      const [scenes, boards, sets, hotkeys, view, advanced] = await Promise.all([
         api.docList<Scene>("scene"),
         api.docList<Board>("board"),
+        api.docList<MusicSet>("set"),
         api.uiGet("hotkeys"),
         api.uiGet("view"),
         api.uiGet("advanced"),
@@ -63,6 +67,7 @@ export const useDocs = create<DocsStore>((set, get) => ({
         loaded: true,
         scenes,
         boards,
+        sets,
         hotkeys: hotkeys ? (JSON.parse(hotkeys) as Hotkey[]) : [],
         view: (view as View | null) ?? "library",
         advanced: advanced === "1",

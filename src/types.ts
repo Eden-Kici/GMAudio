@@ -1,7 +1,7 @@
 // The things a GM builds. Each is saved as one JSON document; the Rust
 // side reads only the parts that decide what is played.
 
-import type { Channel } from "./api";
+import type { Channel, Quantize } from "./api";
 
 export type SceneMusic =
   | { kind: "keep" }
@@ -34,6 +34,48 @@ export interface Scene {
   /** The soundboard shown while this scene is active. */
   board_id: number | null;
   /** The campaign this scene belongs to. `null`: shared by all. */
+  campaign_id: number | null;
+}
+
+/** One intensity level of a piece of dynamic music. */
+export interface Tier {
+  name: string;
+  /** Tracks kind: this level's recording. */
+  asset_id: number | null;
+  /** Stems kind: per layer, its volume in dB, or null for off. */
+  stems: (number | null)[];
+}
+
+export interface Stem {
+  name: string;
+  asset_id: number;
+}
+
+/** A short musical cue played in time with the music. */
+export interface Stinger {
+  name: string;
+  asset_id: number | null;
+  quantize: Quantize;
+  /** Level to change to when the stinger ends. */
+  then_tier: number | null;
+  duck: boolean;
+}
+
+export interface MusicSet {
+  name: string;
+  color: string;
+  /** "tracks": one recording per level. "stems": synced layers mixed per level. */
+  kind: "tracks" | "stems";
+  bpm: number;
+  beats_per_bar: number;
+  bars_per_phrase: number;
+  offset_ms: number;
+  crossfade_ms: number;
+  /** When level changes happen. */
+  quantize: Quantize;
+  tiers: Tier[];
+  stems: Stem[];
+  stingers: Stinger[];
   campaign_id: number | null;
 }
 
@@ -103,6 +145,26 @@ export const newPad = (): Pad => ({
   pitch_var: 0,
   volume_var: 0,
   color: COLORS[3],
+});
+
+export const newSet = (name: string): MusicSet => ({
+  name,
+  color: COLORS[1],
+  kind: "tracks",
+  bpm: 120,
+  beats_per_bar: 4,
+  bars_per_phrase: 4,
+  offset_ms: 0,
+  crossfade_ms: 600,
+  quantize: "bar",
+  tiers: [
+    { name: "Calm", asset_id: null, stems: [] },
+    { name: "Tense", asset_id: null, stems: [] },
+    { name: "Combat", asset_id: null, stems: [] },
+  ],
+  stems: [],
+  stingers: [],
+  campaign_id: null,
 });
 
 export const newBoard = (name: string): Board => ({ name, columns: 5, pads: [], campaign_id: null });

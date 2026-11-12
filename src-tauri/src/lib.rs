@@ -7,7 +7,7 @@ use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
 use gmaudio_core::engine::{
-    Channel, Engine, EngineState, MixerSettings, PanicOutcome, PlayRequest,
+    Channel, Engine, EngineState, MixerSettings, PanicOutcome, PlayRequest, Quantize,
 };
 use gmaudio_core::library::{Library, LibraryEvent, ScanStatus};
 use gmaudio_core::model::{Asset, Folder, Tag};
@@ -242,9 +242,67 @@ fn engine_preload(state: State<'_, AppState>, asset_ids: Vec<i64>) -> CmdResult<
 #[tauri::command(async)]
 fn scene_apply(state: State<'_, AppState>, id: i64, data: Value) -> CmdResult<Vec<String>> {
     let doc: project::SceneDoc = serde_json::from_value(data).map_err(msg)?;
-    let resolved = project::scene_request(&state.library, id, &doc);
+    let mut resolved = project::scene_request(&state.library, id, &doc);
     state.engine.apply_scene(resolved.request).map_err(msg)?;
+
+    // Dynamic music: start the set, or just move tier if it is already on.
+    if let project::SceneMusicDoc::Set { set_id, tier } = doc.music {
+        let playing = state.engine.state().map_err(msg)?.music_set.map(|s| s.id);
+        if playing == Some(set_id) {
+            state.engine.set_tier(tier, None).map_err(msg)?;
+        } else {
+            match state.library.doc(set_id).map_err(msg)? {
+                Some((kind, json)) if kind == "set" => {
+                    let set: project::MusicSetDoc = serde_json::from_str(&json).map_err(msg)?;
+                    let set = project::set_request(&state.library, set_id, &set, tier).map_err(msg)?;
+                    state.engine.play_set(set.request).map_err(msg)?;
+                    resolved.skipped.extend(set.skipped);
+                }
+                _ => resolved.skipped.push("This scene's music set no longer exists.".into()),
+            }
+        }
+    }
     Ok(resolved.skipped)
+}
+
+/// Starts a piece of dynamic music at one of its tiers.
+#[tauri::command(async)]
+fn set_play(state: State<'_, AppState>, id: i64, data: Value, tier: Option<usize>) -> CmdResult<Vec<String>> {
+    let doc: project::MusicSetDoc = serde_json::from_value(data).map_err(msg)?;
+    let resolved = project::set_request(&state.library, id, &doc, tier.unwrap_or(0)).map_err(msg)?;
+    state.engine.play_set(resolved.request).map_err(msg)?;
+    Ok(resolved.skipped)
+}
+
+/// Changes the tier of the music set that is playing. Without `quantize`
+/// the set's own timing is used.
+#[tauri::command(async)]
+fn set_tier(state: State<'_, AppState>, tier: usize, quantize: Option<Quantize>) -> CmdResult<()> {
+    state.engine.set_tier(tier, quantize).map_err(msg)
+}
+
+#[tauri::command(async)]
+fn set_step(state: State<'_, AppState>, delta: i32) -> CmdResult<()> {
+    state.engine.step_tier(delta).map_err(msg)
+}
+
+/// Plays a stinger in time with the music set, optionally changing tier
+/// when it ends.
+#[tauri::command(async)]
+fn stinger_play(
+    state: State<'_, AppState>,
+    asset_id: i64,
+    quantize: Option<Quantize>,
+    then_tier: Option<usize>,
+    duck: Option<bool>,
+    tag: Option<String>,
+) -> CmdResult<u64> {
+    let request = PlayRequest {
+        duck,
+        tag,
+        ..project::play_request(&state.library, asset_id, Channel::Stingers).map_err(msg)?
+    };
+    state.engine.play_stinger(request, quantize.unwrap_or(Quantize::Beat), then_tier).map_err(msg)
 }
 
 #[tauri::command(async)]
@@ -405,6 +463,10 @@ pub fn run() {
             engine_set_sound_trim,
             engine_set_duck_db,
             scene_apply,
+            set_play,
+            set_tier,
+            set_step,
+            stinger_play,
             engine_panic,
             engine_retry_device,
             engine_command_log,

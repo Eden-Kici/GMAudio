@@ -366,7 +366,8 @@ impl Db {
 
         tx.execute(
             "UPDATE assets SET hash = ?2, duration_ms = ?3, sample_rate = ?4, channels = ?5,
-                    loudness_lufs = ?6, gain_db = ?7, status = 1, error = NULL
+                    loudness_lufs = ?6, gain_db = ?7, bpm = ?8, beat_offset_ms = ?9,
+                    status = 1, error = NULL
              WHERE id = ?1",
             params![
                 target,
@@ -375,7 +376,9 @@ impl Db {
                 a.sample_rate,
                 a.channels,
                 a.loudness_lufs,
-                a.gain_db
+                a.gain_db,
+                a.bpm,
+                a.beat_offset_ms
             ],
         )?;
         tx.commit()?;
@@ -545,6 +548,16 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Marks sounds long enough to have a tempo, but analysed before tempo
+    /// detection existed, to be analysed again. Returns how many.
+    pub fn requeue_for_tempo(&self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE assets SET status = 0
+             WHERE status = 1 AND missing = 0 AND bpm IS NULL AND duration_ms >= 8000",
+            [],
+        )?)
+    }
+
     // ---- documents -----------------------------------------------------
 
     /// All documents of one kind as (id, json), oldest first.
@@ -657,7 +670,7 @@ mod tests {
             sample_rate: 48000,
             channels: 2,
             loudness_lufs: Some(-20.0),
-            gain_db: 2.0,
+            gain_db: 2.0, bpm: None, beat_offset_ms: None,
         }
     }
 

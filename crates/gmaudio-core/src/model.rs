@@ -93,6 +93,10 @@ pub struct Analysis {
     /// `None` for silent or very short files.
     pub loudness_lufs: Option<f64>,
     pub gain_db: f64,
+    /// Detected tempo, for sounds with a steady beat.
+    pub bpm: Option<f64>,
+    /// Where the first beat falls.
+    pub beat_offset_ms: Option<f64>,
 }
 
 /// The four tags that say which mixer channel a sound belongs on, in

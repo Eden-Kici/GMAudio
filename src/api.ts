@@ -171,6 +171,21 @@ export interface PlayOptions {
   tag?: string;
 }
 
+export type Quantize = "now" | "beat" | "bar" | "phrase" | "loop";
+
+export interface SetState {
+  id: number;
+  name: string;
+  tiers: string[];
+  tier: number;
+  /** A tier change waiting for its beat. */
+  pending: number | null;
+  bpm: number;
+  beats_per_bar: number;
+  beat: number;
+  bar: number;
+}
+
 export interface EngineState {
   device_ok: boolean;
   device_error: string | null;
@@ -185,6 +200,7 @@ export interface EngineState {
   duck_db: number;
   /** Peak levels: music, ambience, sfx, stingers, master. */
   levels: [number, number, number, number, number];
+  music_set: SetState | null;
 }
 
 export type PanicOutcome = "idle" | "fading" | "cut";
@@ -221,6 +237,11 @@ export const api = {
     invoke<number>("engine_play", { assetId, channel, options }),
   preload: (assetIds: number[]) => invoke<void>("engine_preload", { assetIds }),
   sceneApply: (id: number, data: unknown) => invoke<string[]>("scene_apply", { id, data }),
+  setPlay: (id: number, data: unknown, tier?: number) => invoke<string[]>("set_play", { id, data, tier: tier ?? null }),
+  setTier: (tier: number, quantize?: Quantize) => invoke<void>("set_tier", { tier, quantize: quantize ?? null }),
+  setStep: (delta: number) => invoke<void>("set_step", { delta }),
+  stingerPlay: (assetId: number, options: { quantize?: Quantize; thenTier?: number | null; duck?: boolean; tag?: string } = {}) =>
+    invoke<number>("stinger_play", { assetId, ...options }),
   setSoundTrim: (id: number, trimDb: number) => invoke<void>("engine_set_sound_trim", { id, trimDb }),
   setDuckDb: (db: number) => invoke<void>("engine_set_duck_db", { db }),
   stopSound: (id: number) => invoke<void>("engine_stop_sound", { id }),

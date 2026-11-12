@@ -1,10 +1,11 @@
 import { useDocs, type View } from "../docs";
-import { GearIcon, GridIcon, LibraryIcon, SceneIcon } from "./icons";
+import { GearIcon, GridIcon, LibraryIcon, SceneIcon, WaveIcon } from "./icons";
 
 const ITEMS: { view: View; label: string; hint: string; icon: typeof GearIcon }[] = [
   { view: "library", label: "Library", hint: "All your music and sounds", icon: LibraryIcon },
   { view: "scenes", label: "Scenes", hint: "Whole soundscapes on one button", icon: SceneIcon },
   { view: "boards", label: "Pads", hint: "Soundboard: effects on pads", icon: GridIcon },
+  { view: "sets", label: "Music", hint: "Dynamic music that changes with the action", icon: WaveIcon },
   { view: "settings", label: "Settings", hint: "Keys and options", icon: GearIcon },
 ];
 

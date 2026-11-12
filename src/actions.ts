@@ -4,7 +4,7 @@ import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
 import { api, type Doc } from "./api";
 import { useDocs } from "./docs";
 import { message, useStore } from "./store";
-import type { Action, Board, Hotkey, Pad, Scene } from "./types";
+import type { Action, Board, Hotkey, MusicSet, Pad, Scene, Stinger } from "./types";
 
 const notify = (e: unknown) => useStore.getState().notify(message(e));
 
@@ -42,6 +42,29 @@ export function sceneFromCurrentMix(name: string): Scene {
     board_id: active?.data.board_id ?? null,
     campaign_id: active?.data.campaign_id ?? null,
   };
+}
+
+// ---- dynamic music -----------------------------------------------------------
+
+const report = (skipped: string[]) => {
+  if (skipped.length > 0) notify(skipped[0]);
+};
+
+export async function playSet(set: Doc<MusicSet>, tier = 0) {
+  try {
+    report(await api.setPlay(set.id, set.data, tier));
+  } catch (e) {
+    notify(e);
+  }
+}
+
+export async function playStinger(stinger: Stinger) {
+  if (stinger.asset_id === null) return;
+  try {
+    await api.stingerPlay(stinger.asset_id, { quantize: stinger.quantize, thenTier: stinger.then_tier, duck: stinger.duck });
+  } catch (e) {
+    notify(e);
+  }
 }
 
 // ---- pads --------------------------------------------------------------------
@@ -127,6 +150,8 @@ export function defaultAction(combo: string): Action | null {
   if (pad >= 0 && visibleBoard && pad < visibleBoard.data.pads.length) {
     return { type: "pad", board: visibleBoard.id, pad };
   }
+  if (combo === "PageUp") return { type: "tier", delta: 1 };
+  if (combo === "PageDown") return { type: "tier", delta: -1 };
   const fn = /^F(\d+)$/.exec(combo);
   if (fn) {
     const scene = useDocs.getState().scenes[Number(fn[1]) - 1];
@@ -136,7 +161,9 @@ export function defaultAction(combo: string): Action | null {
 }
 
 /** Hooks other parts of the app fill in (cue list, dynamic music). */
-export const handlers: { go?: () => void; tier?: (delta: number) => void } = {};
+export const handlers: { go?: () => void; tier?: (delta: number) => void } = {
+  tier: (delta) => void api.setStep(delta).catch(notify),
+};
 
 export function runAction(action: Action, phase: "down" | "up" = "down") {
   const docs = useDocs.getState();

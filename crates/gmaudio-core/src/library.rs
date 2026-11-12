@@ -183,6 +183,13 @@ impl Library {
             self.inner.reload_index()?;
             self.set_setting(DONE, "1")?;
         }
+        // Likewise tempo: measure music that was analysed before it existed.
+        const TEMPO: &str = "tempo_measured";
+        if self.get_setting(TEMPO)?.is_none() {
+            self.inner.db.lock().unwrap().requeue_for_tempo()?;
+            self.inner.reload_index()?;
+            self.set_setting(TEMPO, "1")?;
+        }
         self.inner.enqueue_pending()?;
         let folders = self.folders()?;
         self.inner.start_watcher(&folders);

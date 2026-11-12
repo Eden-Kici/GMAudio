@@ -11,5 +11,6 @@ pub mod library;
 pub mod model;
 pub mod project;
 pub mod search;
+pub mod tempo;
 
 pub use error::{Error, Result};

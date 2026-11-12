@@ -14,6 +14,7 @@ import { ScenesView } from "./components/ScenesView";
 import { BoardsView } from "./components/BoardsView";
 import { SettingsView } from "./components/SettingsView";
 import { Palette } from "./components/Palette";
+import { SetsView } from "./components/SetsView";
 
 export default function App() {
   const init = useStore((s) => s.init);
@@ -99,6 +100,7 @@ export default function App() {
         )}
         {view === "scenes" && <ScenesView />}
         {view === "boards" && <BoardsView />}
+        {view === "sets" && <SetsView />}
         {view === "settings" && <SettingsView />}
       </div>
       <Mixer />

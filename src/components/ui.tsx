@@ -12,8 +12,11 @@ export const buttonClass =
   "inline-flex h-9 items-center justify-center gap-2 rounded-md bg-raised px-3 text-sm font-medium text-ink hover:bg-line disabled:opacity-40";
 export const primaryClass =
   "inline-flex h-9 items-center justify-center gap-2 rounded-md bg-accent px-3.5 text-sm font-semibold text-bg hover:brightness-110 disabled:opacity-40";
-export const inputClass =
-  "h-9 w-full select-text rounded-md border border-line bg-bg px-2.5 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none";
+/** A text field's look, without a width or height. */
+export const inputBase =
+  "select-text rounded-md border border-line bg-bg px-2.5 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none";
+/** A full-width text field of standard height. */
+export const inputClass = `${inputBase} h-9 w-full`;
 
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (

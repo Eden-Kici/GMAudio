@@ -14,6 +14,7 @@ import {
   Field,
   formatDb,
   HotkeyInput,
+  inputBase,
   inputClass,
   primaryClass,
   Segmented,
@@ -119,6 +120,7 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
   const assets = useDocs((s) => s.assets);
   const needAssets = useDocs((s) => s.needAssets);
   const boards = useDocs((s) => s.boards);
+  const sets = useDocs((s) => s.sets);
   const hotkey = useDocs((s) => s.hotkeys.find((h) => h.action.type === "scene" && h.action.id === scene.id));
   const index = useDocs((s) => s.scenes.findIndex((x) => x.id === scene.id));
   const [addingLayer, setAddingLayer] = useState(false);
@@ -149,16 +151,52 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
         <Field label="Music">
           <Segmented
-            value={data.music.kind === "set" ? "keep" : data.music.kind}
+            value={data.music.kind}
             onChange={(kind) =>
-              set({ music: kind === "tracks" ? { kind, asset_ids: data.music.kind === "tracks" ? data.music.asset_ids : [] } : { kind } })
+              set({
+                music:
+                  kind === "tracks"
+                    ? { kind, asset_ids: data.music.kind === "tracks" ? data.music.asset_ids : [] }
+                    : kind === "set"
+                      ? { kind, set_id: sets[0]?.id ?? 0, tier: 0 }
+                      : { kind },
+              })
             }
             options={[
               { value: "keep", label: "Leave as is", title: "Whatever music is playing carries on" },
-              { value: "tracks", label: "Play tracks" },
-              { value: "silence", label: "No music", title: "Fade the music out" },
+              { value: "tracks", label: "Tracks" },
+              ...(sets.length > 0 || data.music.kind === "set" ? [{ value: "set" as const, label: "Dynamic", title: "A music set, at a level you choose" }] : []),
+              { value: "silence", label: "None", title: "Fade the music out" },
             ]}
           />
+          {data.music.kind === "set" && (
+            <div className="flex gap-2">
+              <select
+                value={data.music.set_id}
+                onChange={(e) => set({ music: { kind: "set", set_id: Number(e.target.value), tier: 0 } })}
+                aria-label="Music set"
+                className={inputClass}
+              >
+                {sets.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.data.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={data.music.tier}
+                onChange={(e) => data.music.kind === "set" && set({ music: { ...data.music, tier: Number(e.target.value) } })}
+                aria-label="Starting level"
+                className={`${inputBase} h-9 w-36`}
+              >
+                {(sets.find((s) => data.music.kind === "set" && s.id === data.music.set_id)?.data.tiers ?? []).map((t, i) => (
+                  <option key={i} value={i}>
+                    {t.name || `Level ${i + 1}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           {data.music.kind === "tracks" && (
             <AssetList
               ids={data.music.asset_ids}
@@ -212,7 +250,7 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
                     value={emitter.name}
                     onChange={(e) => setEmitter(at, { name: e.target.value })}
                     placeholder="Name, e.g. Distant thunder"
-                    className={`${inputClass} h-8`}
+                    className={`${inputBase} w-full h-8`}
                   />
                   <button onClick={() => set({ emitters: data.emitters.filter((_, i) => i !== at) })} aria-label="Remove" className="rounded p-1.5 text-dim hover:bg-line hover:text-ink">
                     <CloseIcon width={12} height={12} />
@@ -233,7 +271,7 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
                     value={emitter.min_s}
                     onChange={(e) => setEmitter(at, { min_s: Math.max(1, Number(e.target.value)) })}
                     aria-label="Shortest gap in seconds"
-                    className={`${inputClass} h-7 w-16 px-1.5 text-center`}
+                    className={`${inputBase} h-7 w-16 px-1.5 text-center`}
                   />
                   to
                   <input
@@ -242,7 +280,7 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
                     value={emitter.max_s}
                     onChange={(e) => setEmitter(at, { max_s: Math.max(1, Number(e.target.value)) })}
                     aria-label="Longest gap in seconds"
-                    className={`${inputClass} h-7 w-16 px-1.5 text-center`}
+                    className={`${inputBase} h-7 w-16 px-1.5 text-center`}
                   />
                   seconds
                 </div>

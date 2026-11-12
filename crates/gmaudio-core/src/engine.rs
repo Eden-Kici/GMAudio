@@ -37,6 +37,10 @@ const DEVICE_RETRY: Duration = Duration::from_secs(3);
 /// One-shots longer than this are streamed from disk instead of being
 /// decoded into memory up front.
 const STATIC_MAX_MS: i64 = 20_000;
+mod music_set;
+pub use music_set::{Quantize, STEM_OFF_DB, SetRequest, SetState, StemRequest, TierRequest};
+use music_set::ActiveSet;
+
 const COMMAND_LOG_SIZE: usize = 300;
 /// How fast music drops when a ducking sound starts, and recovers after.
 const DUCK_ATTACK: Duration = Duration::from_millis(120);
@@ -186,6 +190,9 @@ pub struct PlayRequest {
     pub duck: Option<bool>,
     /// Who started it (e.g. `pad:12:3`), so the UI can light the right button.
     pub tag: Option<String>,
+    /// Hold the sound back this long before it starts (a stinger waiting
+    /// for the beat).
+    pub delay_ms: u32,
 }
 
 /// A layer that plays a sound from its pool every so often: distant
@@ -299,6 +306,8 @@ pub struct EngineState {
     /// Peak level since the last update, 0 to 1 and beyond: the four
     /// channels in order, then the master.
     pub levels: [f32; 5],
+    /// The dynamic music set that is playing, if any.
+    pub music_set: Option<SetState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -462,6 +471,12 @@ pub struct Mixer<B: Backend = DefaultBackend> {
     emitters: Vec<Emitter>,
     scene: Option<SceneState>,
     ducked: bool,
+    /// The dynamic music set that is playing.
+    set: Option<ActiveSet>,
+    /// Sounds of a stopped set, fading out.
+    set_tails: Vec<Handle>,
+    /// (stinger sound id, tier to change to when it ends)
+    after_stingers: Vec<(u64, usize)>,
     /// Short sounds decoded ahead of time, for instant starts.
     cache: HashMap<PathBuf, StaticSoundData>,
     cache_order: VecDeque<PathBuf>,
@@ -497,6 +512,9 @@ impl<B: Backend> Mixer<B> {
             emitters: Vec::new(),
             scene: None,
             ducked: false,
+            set: None,
+            set_tails: Vec::new(),
+            after_stingers: Vec::new(),
             cache: HashMap::new(),
             cache_order: VecDeque::new(),
             tracks,
@@ -573,7 +591,12 @@ impl<B: Backend> Mixer<B> {
         // Crossfade when other music is sounding (playing or fading out);
         // otherwise the track starts promptly.
         let over_music = channel == Channel::Music
-            && self.sounds.iter().any(|s| s.channel == Channel::Music);
+            && (self.sounds.iter().any(|s| s.channel == Channel::Music) || self.set_is_sounding());
+        let start_time = if req.delay_ms > 0 {
+            kira::StartTime::Delayed(ms(req.delay_ms))
+        } else {
+            kira::StartTime::Immediate
+        };
         let fade_in_tween = match channel {
             Channel::Music if over_music => Some(fade_in(fade)),
             Channel::Music => Some(fade_in(Duration::from_millis(80))),
@@ -597,6 +620,7 @@ impl<B: Backend> Mixer<B> {
                 .volume(volume)
                 .playback_rate(rate)
                 .panning(pan)
+                .start_time(start_time)
                 .fade_in_tween(fade_in_tween);
             if repeating {
                 data = data.loop_region(..);
@@ -612,6 +636,7 @@ impl<B: Backend> Mixer<B> {
                 .volume(volume)
                 .playback_rate(rate)
                 .panning(pan)
+                .start_time(start_time)
                 .fade_in_tween(fade_in_tween);
             if repeating {
                 data = data.loop_region(..);
@@ -626,6 +651,7 @@ impl<B: Backend> Mixer<B> {
         // Only fade the old music out once the new track is really playing,
         // so a file that fails to load never leaves the table in silence.
         if channel == Channel::Music {
+            self.stop_set(fade);
             for s in self.sounds.iter_mut().filter(|s| s.channel == Channel::Music) {
                 if !s.stopping {
                     s.handle.stop(fade_out(fade));
@@ -937,6 +963,9 @@ impl<B: Backend> Mixer<B> {
             self.emitters.clear();
         }
         let fade = fade_ms.unwrap_or(self.settings.channels[channel.index()].fade_ms);
+        if channel == Channel::Music {
+            self.stop_set(ms(fade));
+        }
         for s in self.sounds.iter_mut().filter(|s| s.channel == channel) {
             s.handle.stop(fade_out(ms(fade)));
             s.stopping = true;
@@ -975,7 +1004,7 @@ impl<B: Backend> Mixer<B> {
         self.queue.clear();
         self.emitters.clear();
         self.scene = None;
-        if self.sounds.is_empty() {
+        if self.sounds.is_empty() && !self.set_is_sounding() {
             self.panic_armed = false;
             return PanicOutcome::Idle;
         }
@@ -987,6 +1016,10 @@ impl<B: Backend> Mixer<B> {
         for s in &mut self.sounds {
             s.handle.stop(tween);
             s.stopping = true;
+        }
+        self.stop_set(PANIC_FADE);
+        if outcome == PanicOutcome::Cut {
+            self.cut_set_tails();
         }
         self.panic_armed = outcome == PanicOutcome::Fading;
         outcome
@@ -1017,11 +1050,12 @@ impl<B: Backend> Mixer<B> {
         }
         self.advance_music();
         self.run_emitters();
+        self.tick_set();
         self.refresh_duck();
         for (level, meter) in self.levels.iter_mut().zip(&self.meters) {
             *level = take_level(meter);
         }
-        if self.sounds.is_empty() {
+        if self.sounds.is_empty() && !self.set_is_sounding() {
             self.panic_armed = false;
         }
     }
@@ -1085,6 +1119,7 @@ impl<B: Backend> Mixer<B> {
             ducked: self.ducked,
             duck_db: self.settings.duck_db,
             levels: self.levels,
+            music_set: self.set_state(),
         }
     }
 }
@@ -1180,6 +1215,10 @@ pub enum Command {
     Cache(Decoded),
     AddEmitter(EmitterRequest),
     ApplyScene(SceneRequest),
+    PlaySet(SetRequest),
+    SetTier { tier: usize, quantize: Option<Quantize> },
+    StepTier { delta: i32 },
+    PlayStinger { request: PlayRequest, quantize: Quantize, then_tier: Option<usize> },
     Panic,
     /// Try to open the audio device again right now.
     RetryDevice,
@@ -1400,6 +1439,25 @@ impl Engine {
         self.send(Command::ApplyScene(scene)).map(|_| ())
     }
 
+    pub fn play_set(&self, request: SetRequest) -> Result<()> {
+        self.send(Command::PlaySet(request)).map(|_| ())
+    }
+
+    pub fn set_tier(&self, tier: usize, quantize: Option<Quantize>) -> Result<()> {
+        self.send(Command::SetTier { tier, quantize }).map(|_| ())
+    }
+
+    pub fn step_tier(&self, delta: i32) -> Result<()> {
+        self.send(Command::StepTier { delta }).map(|_| ())
+    }
+
+    pub fn play_stinger(&self, request: PlayRequest, quantize: Quantize, then_tier: Option<usize>) -> Result<u64> {
+        match self.send(Command::PlayStinger { request, quantize, then_tier })? {
+            Reply::Started(id) => Ok(id),
+            _ => unreachable!("play stinger always replies with an id"),
+        }
+    }
+
     pub fn panic(&self) -> Result<PanicOutcome> {
         match self.send(Command::Panic)? {
             Reply::Panic(outcome) => Ok(outcome),
@@ -1500,6 +1558,12 @@ fn run<B: Backend>(mixer: &mut Mixer<B>, command: Command) -> Result<Reply> {
             mixer.apply_scene(scene);
             Ok(Reply::Done)
         }
+        Command::PlaySet(request) => mixer.play_set(request).map(|_| Reply::Done),
+        Command::SetTier { tier, quantize } => mixer.set_tier(tier, quantize).map(|_| Reply::Done),
+        Command::StepTier { delta } => mixer.step_tier(delta).map(|_| Reply::Done),
+        Command::PlayStinger { request, quantize, then_tier } => {
+            mixer.play_stinger(request, quantize, then_tier).map(Reply::Started)
+        }
         Command::Panic => Ok(Reply::Panic(mixer.panic())),
         Command::RetryDevice => Ok(Reply::Done),
     }
@@ -1542,7 +1606,10 @@ fn run_offline(
             settings.duck_db = db.clamp(-40.0, 0.0);
             Ok(Reply::Done)
         }
-        Command::AddEmitter(_) | Command::ApplyScene(_) => Err(no_device()),
+        Command::AddEmitter(_) | Command::ApplyScene(_) | Command::PlaySet(_) | Command::PlayStinger { .. } => {
+            Err(no_device())
+        }
+        Command::SetTier { .. } | Command::StepTier { .. } => Ok(Reply::Done),
         Command::Panic => Ok(Reply::Panic(PanicOutcome::Idle)),
         Command::StopSound { .. }
         | Command::SetSoundTrim { .. }
@@ -1575,20 +1642,23 @@ fn current_state<B: Backend>(
             ducked: false,
             duck_db: settings.duck_db,
             levels: [0.0; 5],
+            music_set: None,
         },
     }
 }
 
+/// Helpers shared by the engine's tests: a mixer on kira's mock device,
+/// which renders audio only when told to.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(in crate::engine) mod test_support {
+    pub(in crate::engine) use super::*;
     use crate::analyze::testutil::write_sine_wav;
-    use kira::backend::mock::{MockBackend, MockBackendSettings};
-    use std::sync::{Arc, Mutex};
+    pub(in crate::engine) use kira::backend::mock::{MockBackend, MockBackendSettings};
 
-    const RATE: u32 = 48_000;
 
-    fn manager() -> AudioManager<MockBackend> {
+    pub(in crate::engine) const RATE: u32 = 48_000;
+
+    pub(in crate::engine) fn manager() -> AudioManager<MockBackend> {
         AudioManager::new(AudioManagerSettings {
             backend_settings: MockBackendSettings { sample_rate: RATE },
             ..Default::default()
@@ -1596,12 +1666,12 @@ mod tests {
         .unwrap()
     }
 
-    fn mixer() -> Mixer<MockBackend> {
+    pub(in crate::engine) fn mixer() -> Mixer<MockBackend> {
         Mixer::new(manager(), MixerSettings::default()).unwrap()
     }
 
     /// Renders `millis` of audio through the mock device.
-    fn render(m: &mut Mixer<MockBackend>, millis: u64) {
+    pub(in crate::engine) fn render(m: &mut Mixer<MockBackend>, millis: u64) {
         // Each process() call renders one internal buffer (128 frames).
         let calls = (millis * RATE as u64 / 1000).div_ceil(128);
         for _ in 0..calls {
@@ -1614,7 +1684,7 @@ mod tests {
 
     /// Streaming sounds decode on their own thread: give them real time
     /// while rendering, until `done` holds.
-    fn render_until(m: &mut Mixer<MockBackend>, mut done: impl FnMut(&Mixer<MockBackend>) -> bool) {
+    pub(in crate::engine) fn render_until(m: &mut Mixer<MockBackend>, mut done: impl FnMut(&Mixer<MockBackend>) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !done(m) {
             assert!(Instant::now() < deadline, "timed out; state: {:?}", m.state());
@@ -1623,13 +1693,13 @@ mod tests {
         }
     }
 
-    struct Files {
-        _dir: tempfile::TempDir,
-        long: PathBuf,
-        short: PathBuf,
+    pub(in crate::engine) struct Files {
+        pub _dir: tempfile::TempDir,
+        pub long: PathBuf,
+        pub short: PathBuf,
     }
 
-    fn files() -> Files {
+    pub(in crate::engine) fn files() -> Files {
         let dir = tempfile::tempdir().unwrap();
         let long = dir.path().join("long.wav");
         let short = dir.path().join("short.wav");
@@ -1642,7 +1712,7 @@ mod tests {
         }
     }
 
-    fn req(path: &PathBuf, channel: Channel, duration_ms: i64) -> PlayRequest {
+    pub(in crate::engine) fn req(path: &PathBuf, channel: Channel, duration_ms: i64) -> PlayRequest {
         PlayRequest {
             asset_id: 7,
             path: path.clone(),
@@ -1655,23 +1725,29 @@ mod tests {
         }
     }
 
-    fn now(mut request: PlayRequest) -> PlayRequest {
+    pub(in crate::engine) fn now(mut request: PlayRequest) -> PlayRequest {
         request.interrupt = true;
         request
     }
 
-    fn music(m: &Mixer<MockBackend>) -> ChannelState {
+    pub(in crate::engine) fn music(m: &Mixer<MockBackend>) -> ChannelState {
         m.state().channels[Channel::Music.index()].clone()
     }
-    use music as music_state;
 
     /// Renders about `millis` of audio, giving streams real time to decode.
-    fn play_for(m: &mut Mixer<MockBackend>, millis: u64) {
+    pub(in crate::engine) fn play_for(m: &mut Mixer<MockBackend>, millis: u64) {
         for _ in 0..millis / 20 {
             render(m, 20);
             thread::sleep(Duration::from_millis(2));
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use std::sync::{Arc, Mutex};
+    use music as music_state;
 
     #[test]
     fn fader_curve() {

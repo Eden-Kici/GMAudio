@@ -7,7 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{Channel, EmitterRequest, PlayRequest, SceneMusic, SceneRequest};
+use crate::engine::{
+    self, Channel, EmitterRequest, PlayRequest, Quantize, STEM_OFF_DB, SceneMusic, SceneRequest,
+    SetRequest, StemRequest, TierRequest,
+};
 use crate::library::Library;
 use crate::model::AnalysisStatus;
 use crate::{Error, Result};
@@ -201,6 +204,128 @@ pub fn scene_request(library: &Library, id: i64, doc: &SceneDoc) -> Resolved<Sce
     }
 }
 
+/// A piece of dynamic music, as the interface saves it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MusicSetDoc {
+    pub name: String,
+    /// `stems`: synced layers mixed per tier. Otherwise one track per tier.
+    pub kind: String,
+    pub bpm: f64,
+    pub beats_per_bar: u32,
+    pub bars_per_phrase: u32,
+    pub offset_ms: f64,
+    pub crossfade_ms: u32,
+    pub quantize: Quantize,
+    pub tiers: Vec<TierDoc>,
+    pub stems: Vec<StemDoc>,
+}
+
+impl Default for MusicSetDoc {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            kind: "tracks".into(),
+            bpm: 120.0,
+            beats_per_bar: 4,
+            bars_per_phrase: 4,
+            offset_ms: 0.0,
+            crossfade_ms: 600,
+            quantize: Quantize::Bar,
+            tiers: Vec::new(),
+            stems: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TierDoc {
+    pub name: String,
+    /// Tracks kind: this tier's recording.
+    pub asset_id: Option<i64>,
+    /// Stems kind: per stem, its volume in dB, or `null` for off.
+    pub stems: Vec<Option<f32>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StemDoc {
+    pub name: String,
+    pub asset_id: i64,
+}
+
+/// Turns a music set document into an engine request.
+///
+/// Stems are decoded here, on the caller's thread, because they are held
+/// in memory whole. A stem that cannot be read is an error (the mix would
+/// be wrong without it); an unreadable tier track becomes a silent tier.
+pub fn set_request(library: &Library, id: i64, doc: &MusicSetDoc, start_tier: usize) -> Result<Resolved<SetRequest>> {
+    let mut skipped = Vec::new();
+    let is_stems = doc.kind == "stems";
+
+    let stems = if is_stems {
+        doc.stems
+            .iter()
+            .map(|stem| {
+                let request = play_request(library, stem.asset_id, Channel::Music)?;
+                let data = engine::decode(&request.path)?;
+                Ok(StemRequest { name: stem.name.clone(), request, data: Some(data) })
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    if is_stems && stems.is_empty() {
+        return Err(Error::Unplayable(format!("\"{}\" has no layers yet.", doc.name)));
+    }
+
+    let tiers: Vec<TierRequest> = doc
+        .tiers
+        .iter()
+        .map(|tier| {
+            let track = if is_stems {
+                None
+            } else {
+                tier.asset_id.and_then(|asset_id| match play_request(library, asset_id, Channel::Music) {
+                    Ok(request) => Some(request),
+                    Err(e) => {
+                        skipped.push(e.to_string());
+                        None
+                    }
+                })
+            };
+            TierRequest {
+                name: tier.name.clone(),
+                track,
+                stem_db: (0..stems.len())
+                    .map(|i| tier.stems.get(i).copied().flatten().unwrap_or(STEM_OFF_DB))
+                    .collect(),
+            }
+        })
+        .collect();
+    if tiers.is_empty() {
+        return Err(Error::Unplayable(format!("\"{}\" has no levels yet.", doc.name)));
+    }
+
+    Ok(Resolved {
+        request: SetRequest {
+            id,
+            name: doc.name.clone(),
+            bpm: if doc.bpm.is_finite() { doc.bpm.clamp(20.0, 400.0) } else { 120.0 },
+            beats_per_bar: doc.beats_per_bar.clamp(1, 16),
+            bars_per_phrase: doc.bars_per_phrase.clamp(1, 64),
+            offset_ms: doc.offset_ms.max(0.0),
+            crossfade_ms: doc.crossfade_ms.min(20_000),
+            quantize: doc.quantize,
+            start_tier: start_tier.min(tiers.len() - 1),
+            tiers,
+            stems,
+        },
+        skipped,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +392,56 @@ mod tests {
         // Missing track, missing layer, unknown layer, missing random sound.
         assert_eq!(resolved.skipped.len(), 4, "{:?}", resolved.skipped);
         assert!(resolved.skipped[0].contains("gone"));
+    }
+
+    #[test]
+    fn a_music_set_document_becomes_an_engine_request() {
+        let (dir, library, ids) = library_with(&["calm", "combat", "drums", "strings", "gone"]);
+        std::fs::remove_file(dir.path().join("gone.wav")).unwrap();
+        library.rescan(None).unwrap();
+        assert!(library.wait_idle(Duration::from_secs(20)));
+
+        // One track per tier; the tier whose file is gone goes silent.
+        let doc: MusicSetDoc = serde_json::from_value(serde_json::json!({
+            "name": "Chase", "bpm": 140, "quantize": "beat",
+            "tiers": [
+                { "name": "Calm", "asset_id": ids[0] },
+                { "name": "Lost", "asset_id": ids[4] },
+                { "name": "Combat", "asset_id": ids[1] }
+            ]
+        }))
+        .unwrap();
+        let resolved = set_request(&library, 3, &doc, 9).unwrap();
+        let set = resolved.request;
+        assert_eq!((set.bpm, set.beats_per_bar, set.quantize), (140.0, 4, Quantize::Beat));
+        assert_eq!(set.start_tier, 2, "clamped to the last tier");
+        assert!(set.stems.is_empty());
+        assert!(set.tiers[0].track.is_some() && set.tiers[1].track.is_none());
+        assert_eq!(resolved.skipped.len(), 1);
+
+        // Layered stems, decoded ahead of time.
+        let doc: MusicSetDoc = serde_json::from_value(serde_json::json!({
+            "name": "Battle", "kind": "stems",
+            "stems": [{ "name": "Drums", "asset_id": ids[2] }, { "name": "Strings", "asset_id": ids[3] }],
+            "tiers": [
+                { "name": "Calm", "stems": [0, null] },
+                { "name": "Full", "stems": [0, -3.0] }
+            ]
+        }))
+        .unwrap();
+        let set = set_request(&library, 4, &doc, 0).unwrap().request;
+        assert_eq!(set.stems.len(), 2);
+        assert!(set.stems.iter().all(|s| s.data.is_some()));
+        assert_eq!(set.tiers[0].stem_db, [0.0, STEM_OFF_DB]);
+        assert_eq!(set.tiers[1].stem_db, [0.0, -3.0]);
+
+        // A missing stem, or a set with nothing in it, is refused in plain words.
+        let broken: MusicSetDoc = serde_json::from_value(serde_json::json!({
+            "kind": "stems", "stems": [{ "asset_id": ids[4] }], "tiers": [{ "name": "A", "stems": [0] }]
+        }))
+        .unwrap();
+        assert!(matches!(set_request(&library, 5, &broken, 0), Err(Error::Unplayable(_))));
+        assert!(matches!(set_request(&library, 6, &MusicSetDoc::default(), 0), Err(Error::Unplayable(_))));
     }
 
     #[test]
