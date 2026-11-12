@@ -6,6 +6,7 @@ import { Browser } from "./components/Browser";
 import { Mixer } from "./components/Mixer";
 import { Notice } from "./components/Notice";
 import { DeviceBanner } from "./components/DeviceBanner";
+import { ContextMenu } from "./components/ContextMenu";
 
 export default function App() {
   const init = useStore((s) => s.init);
@@ -27,15 +28,19 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Esc is the panic key everywhere, even while typing in the search box.
+      // The one exception: an open menu, which Esc closes instead.
       if (e.key === "Escape") {
         e.preventDefault();
-        void panic();
+        const { menu, openMenu } = useStore.getState();
+        if (menu) openMenu(null);
+        else void panic();
         return;
       }
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement;
       if (!typing && (e.key === "/" || (e.ctrlKey && e.key.toLowerCase() === "f"))) {
         e.preventDefault();
-        document.getElementById("library-search")?.focus();
+        const pane = useStore.getState().activePane;
+        document.querySelector<HTMLInputElement>(`[data-pane-search="${pane}"]`)?.focus();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -52,6 +57,7 @@ export default function App() {
       </div>
       <Mixer />
       <Notice />
+      <ContextMenu />
     </div>
   );
 }

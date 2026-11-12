@@ -71,3 +71,35 @@ export const VolumeIcon = ({ muted, ...p }: SVGProps<SVGSVGElement> & { muted?: 
     {muted ? <path d="m10.500 6 4 4M14.500 6l-4 4" /> : <path d="M10.500 5.500a3.500 3.500 0 0 1 0 5M12.500 3.500a6 6 0 0 1 0 9" />}
   </svg>
 );
+
+export const PlayIcon = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)} fill="currentColor" stroke="none">
+    <path d="M4.5 2.8v10.4a.6.6 0 0 0 .92.5l8-5.2a.6.6 0 0 0 0-1l-8-5.2a.6.6 0 0 0-.92.5Z" />
+  </svg>
+);
+
+export const NextIcon = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="M3.5 3.5 10 8l-6.5 4.5v-9Z" fill="currentColor" />
+    <path d="M12.5 3.5v9" />
+  </svg>
+);
+
+export const SplitIcon = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <rect x="2" y="3" width="12" height="10" rx="1.5" />
+    <path d="M8 3v10" />
+  </svg>
+);
+
+export const CheckIcon = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="m3.5 8.5 3 3 6-7" />
+  </svg>
+);
+
+export const ChevronIcon = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="m4 6 4 4 4-4" />
+  </svg>
+);

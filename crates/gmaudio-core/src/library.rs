@@ -15,7 +15,10 @@ use walkdir::WalkDir;
 
 use crate::analyze::analyze;
 use crate::db::{Db, FoundFile};
-use crate::model::{Asset, Folder, SUPPORTED_EXTENSIONS, Tag};
+use crate::model::{
+    Asset, CHANNEL_TAG_CATEGORY, CHANNEL_TAGS, Folder, SUPPORTED_EXTENSIONS, Tag,
+    guess_channel_tag,
+};
 use crate::search::{Index, Query, SearchResult};
 use crate::{Error, Result};
 
@@ -173,6 +176,13 @@ impl Library {
     /// Resumes unfinished analysis, rescans every folder for changes made
     /// while the app was closed, and starts watching the folders.
     pub fn start(&self) -> Result<()> {
+        // Libraries imported before channel tags existed get them once.
+        const DONE: &str = "channel_tags_guessed";
+        if self.get_setting(DONE)?.is_none() {
+            self.inner.guess_channel_tags(None)?;
+            self.inner.reload_index()?;
+            self.set_setting(DONE, "1")?;
+        }
         self.inner.enqueue_pending()?;
         let folders = self.folders()?;
         self.inner.start_watcher(&folders);
@@ -262,6 +272,31 @@ impl Library {
         Ok(asset)
     }
 
+    /// Adds or removes one tag on many assets at once.
+    pub fn set_tag_on(&self, asset_ids: &[i64], tag: &Tag, on: bool) -> Result<()> {
+        self.inner.db.lock().unwrap().set_tag_on(asset_ids, tag, on)?;
+        self.inner.reload_index()?;
+        self.inner.emit_changed(true);
+        Ok(())
+    }
+
+    /// Documents of one kind as (id, json).
+    pub fn docs(&self, kind: &str) -> Result<Vec<(i64, String)>> {
+        self.inner.db.lock().unwrap().docs(kind)
+    }
+
+    pub fn doc(&self, id: i64) -> Result<Option<(String, String)>> {
+        self.inner.db.lock().unwrap().doc(id)
+    }
+
+    pub fn put_doc(&self, kind: &str, id: Option<i64>, data: &str) -> Result<i64> {
+        self.inner.db.lock().unwrap().put_doc(kind, id, data)
+    }
+
+    pub fn delete_doc(&self, id: i64) -> Result<()> {
+        self.inner.db.lock().unwrap().delete_doc(id)
+    }
+
     /// All tags with their asset counts.
     pub fn tags(&self) -> Result<Vec<(Tag, i64)>> {
         self.inner.db.lock().unwrap().tags()
@@ -346,6 +381,28 @@ impl Inner {
         Ok(())
     }
 
+    /// Gives assets that have no channel tag one guessed from their folder
+    /// names. `since` limits this to a folder's newly added files.
+    fn guess_channel_tags(&self, since: Option<(i64, i64)>) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let candidates = db.assets_without_tags(&CHANNEL_TAGS, since)?;
+        let mut by_tag: [Vec<i64>; 4] = Default::default();
+        for (id, path) in candidates {
+            if let Some(tag) = guess_channel_tag(&path) {
+                let slot = CHANNEL_TAGS.iter().position(|t| *t == tag).unwrap_or(0);
+                by_tag[slot].push(id);
+            }
+        }
+        for (name, ids) in CHANNEL_TAGS.iter().zip(&by_tag) {
+            let tag = Tag {
+                name: (*name).into(),
+                category: CHANNEL_TAG_CATEGORY.into(),
+            };
+            db.set_tag_on(ids, &tag, true)?;
+        }
+        Ok(())
+    }
+
     // ---- scanning ------------------------------------------------------
 
     fn request_scan(&self, folder_id: i64) {
@@ -418,7 +475,11 @@ impl Inner {
             if self.stopping() {
                 return Ok(());
             }
+            let before = UNIX_EPOCH.elapsed().map(|d| d.as_secs() as i64).unwrap_or(0);
             let diff = self.db.lock().unwrap().apply_scan(folder_id, &found)?;
+            if diff.added > 0 {
+                self.guess_channel_tags(Some((folder_id, before)))?;
+            }
             if !diff.is_empty() {
                 self.reload_index()?;
                 self.enqueue_pending()?;
@@ -777,5 +838,51 @@ mod tests {
         let all = lib.search(&q(""));
         assert_eq!(all.total, 10_000);
         assert!(all.assets.iter().all(|a| a.status == AnalysisStatus::Ok));
+    }
+}
+
+#[cfg(test)]
+mod channel_tag_tests {
+    use super::*;
+    use crate::analyze::testutil::write_sine_wav;
+
+    #[test]
+    fn new_files_get_a_channel_tag_from_their_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        for sub in ["Music/Taverns", "Ambience", "SFX", "Misc"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+        }
+        write_sine_wav(&dir.path().join("Music/Taverns/reel.wav"), 0.5, 220.0, -12.0, 1);
+        write_sine_wav(&dir.path().join("Ambience/rain.wav"), 0.5, 220.0, -12.0, 1);
+        write_sine_wav(&dir.path().join("SFX/door.wav"), 0.5, 220.0, -12.0, 1);
+        write_sine_wav(&dir.path().join("Misc/thing.wav"), 0.5, 220.0, -12.0, 1);
+
+        let lib = Library::in_memory(|_| {}).unwrap();
+        lib.start().unwrap();
+        lib.add_folder(dir.path()).unwrap();
+        assert!(lib.wait_idle(Duration::from_secs(20)));
+
+        let tags_of = |name: &str| -> Vec<String> {
+            let found = lib.search(&Query { text: name.into(), ..Default::default() });
+            found.assets[0].tags.iter().map(|t| t.name.clone()).collect()
+        };
+        assert_eq!(tags_of("reel"), ["Music"]);
+        assert_eq!(tags_of("rain"), ["Ambience"]);
+        assert_eq!(tags_of("door"), ["Sound effects"]);
+        assert!(tags_of("thing").is_empty());
+
+        // A tag the GM removes is not put back by a rescan.
+        let reel = lib.search(&Query { text: "reel".into(), ..Default::default() }).assets[0].id;
+        lib.set_tags(reel, &[]).unwrap();
+        lib.rescan(None).unwrap();
+        assert!(lib.wait_idle(Duration::from_secs(20)));
+        assert!(tags_of("reel").is_empty());
+
+        // Tag filter and bulk tagging.
+        let all: Vec<i64> = lib.search(&Query::default()).assets.iter().map(|a| a.id).collect();
+        let tag = Tag { name: "session 3".into(), category: "custom".into() };
+        lib.set_tag_on(&all, &tag, true).unwrap();
+        let found = lib.search(&Query { tags: vec!["session 3".into()], ..Default::default() });
+        assert_eq!(found.total, 4);
     }
 }

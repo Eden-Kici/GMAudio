@@ -61,6 +61,17 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     ",
+    // 2: everything the GM builds (scenes, boards, music sets, cue lists,
+    // campaigns...) is stored as one JSON document per item.
+    "
+    CREATE TABLE docs (
+        id         INTEGER PRIMARY KEY,
+        kind       TEXT NOT NULL,
+        data       TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX docs_kind ON docs(kind);
+    ",
 ];
 
 const ASSET_COLUMNS: &str = "id, folder_id, path, name, ext, size, mtime, hash, duration_ms, \
@@ -130,8 +141,20 @@ fn asset_from_row(row: &Row) -> rusqlite::Result<Asset> {
 }
 
 impl Db {
+    /// Opens the library, upgrading it if it was made by an older version.
+    ///
+    /// Before an upgrade the old database is copied next to the original
+    /// (`library.backup-v1.db`), so a bad upgrade can always be undone.
     pub fn open(path: &Path) -> Result<Self> {
-        Self::init(Connection::open(path)?)
+        let conn = Connection::open(path)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > 0 && (version as usize) < MIGRATIONS.len() {
+            let backup = path.with_extension(format!("backup-v{version}.db"));
+            if !backup.exists() {
+                conn.execute("VACUUM INTO ?1", params![backup.to_string_lossy()])?;
+            }
+        }
+        Self::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -460,6 +483,116 @@ impl Db {
         Ok(())
     }
 
+    /// Adds or removes one tag on many assets at once.
+    pub fn set_tag_on(&mut self, asset_ids: &[i64], tag: &Tag, on: bool) -> Result<()> {
+        let name = tag.name.trim();
+        if name.is_empty() || asset_ids.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        if on {
+            tx.execute(
+                "INSERT OR IGNORE INTO tags (name, category) VALUES (?1, ?2)",
+                params![name, tag.category],
+            )?;
+            let tag_id: i64 =
+                tx.query_row("SELECT id FROM tags WHERE name = ?1", params![name], |r| r.get(0))?;
+            let mut stmt =
+                tx.prepare("INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?1, ?2)")?;
+            for id in asset_ids {
+                stmt.execute(params![id, tag_id])?;
+            }
+        } else {
+            let mut stmt = tx.prepare(
+                "DELETE FROM asset_tags WHERE asset_id = ?1
+                 AND tag_id IN (SELECT id FROM tags WHERE name = ?2)",
+            )?;
+            for id in asset_ids {
+                stmt.execute(params![id, name])?;
+            }
+            drop(stmt);
+            tx.execute(
+                "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM asset_tags)",
+                [],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Assets (id, path) carrying none of the given tags. With `since`, only
+    /// assets of that folder added at or after that time.
+    pub fn assets_without_tags(
+        &self,
+        tag_names: &[&str],
+        since: Option<(i64, i64)>,
+    ) -> Result<Vec<(i64, String)>> {
+        let list = tag_names
+            .iter()
+            .map(|t| format!("'{}'", t.to_lowercase().replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (folder_id, added_at) = since.unwrap_or((-1, 0));
+        let sql = format!(
+            "SELECT a.id, a.path FROM assets a
+             WHERE (?1 < 0 OR (a.folder_id = ?1 AND a.added_at >= ?2))
+             AND NOT EXISTS (
+                 SELECT 1 FROM asset_tags at JOIN tags t ON t.id = at.tag_id
+                 WHERE at.asset_id = a.id AND lower(t.name) IN ({list}))"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![folder_id, added_at], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- documents -----------------------------------------------------
+
+    /// All documents of one kind as (id, json), oldest first.
+    pub fn docs(&self, kind: &str) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, data FROM docs WHERE kind = ?1 ORDER BY id")?;
+        let rows = stmt.query_map(params![kind], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn doc(&self, id: i64) -> Result<Option<(String, String)>> {
+        Ok(self
+            .conn
+            .query_row("SELECT kind, data FROM docs WHERE id = ?1", params![id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?)
+    }
+
+    /// Creates (`id: None`) or replaces a document. Returns its id.
+    pub fn put_doc(&self, kind: &str, id: Option<i64>, data: &str) -> Result<i64> {
+        match id {
+            Some(id) => {
+                let n = self.conn.execute(
+                    "UPDATE docs SET data = ?2, updated_at = ?3 WHERE id = ?1 AND kind = ?4",
+                    params![id, data, now(), kind],
+                )?;
+                if n == 0 {
+                    return Err(Error::NotFound(format!("{kind} {id}")));
+                }
+                Ok(id)
+            }
+            None => {
+                self.conn.execute(
+                    "INSERT INTO docs (kind, data, updated_at) VALUES (?1, ?2, ?3)",
+                    params![kind, data, now()],
+                )?;
+                Ok(self.conn.last_insert_rowid())
+            }
+        }
+    }
+
+    pub fn delete_doc(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM docs WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     /// All tags with how many (non-missing) assets carry them.
     pub fn tags(&self) -> Result<Vec<(Tag, i64)>> {
         let mut stmt = self.conn.prepare(
@@ -636,5 +769,101 @@ mod tests {
         db.set_setting("k", "1").unwrap();
         db.set_setting("k", "2").unwrap();
         assert_eq!(db.get_setting("k").unwrap().as_deref(), Some("2"));
+    }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+
+    fn file(path: &str) -> FoundFile {
+        FoundFile {
+            path: path.into(),
+            name: path.rsplit('/').next().unwrap().into(),
+            ext: "wav".into(),
+            size: 1,
+            mtime: 1,
+        }
+    }
+
+    fn tag(name: &str) -> Tag {
+        Tag {
+            name: name.into(),
+            category: "custom".into(),
+        }
+    }
+
+    #[test]
+    fn bulk_tagging_and_untagged_lookup() {
+        let mut db = Db::open_in_memory().unwrap();
+        let folder = db.add_folder("/lib").unwrap();
+        db.apply_scan(folder, &[file("/lib/a.wav"), file("/lib/b.wav"), file("/lib/c.wav")])
+            .unwrap();
+        let ids: Vec<i64> = db.all_assets().unwrap().iter().map(|a| a.id).collect();
+
+        db.set_tag_on(&ids[..2], &tag("Music"), true).unwrap();
+        db.set_tag_on(&ids[..2], &tag("Music"), true).unwrap(); // idempotent
+        let untagged = db.assets_without_tags(&["music", "Ambience"], None).unwrap();
+        assert_eq!(untagged, vec![(ids[2], "/lib/c.wav".to_string())]);
+        assert_eq!(db.tags().unwrap()[0].1, 2);
+
+        // Limited to one folder's files added since a moment in time.
+        assert_eq!(db.assets_without_tags(&["Music"], Some((folder, 0))).unwrap().len(), 1);
+        assert!(db.assets_without_tags(&["Music"], Some((folder, i64::MAX))).unwrap().is_empty());
+        assert!(db.assets_without_tags(&["Music"], Some((folder + 1, 0))).unwrap().is_empty());
+
+        db.set_tag_on(&ids, &tag("music"), false).unwrap();
+        assert!(db.tags().unwrap().is_empty(), "unused tags are pruned");
+    }
+
+    #[test]
+    fn documents_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db.put_doc("scene", None, r#"{"name":"Tavern"}"#).unwrap();
+        let b = db.put_doc("scene", None, r#"{"name":"Crypt"}"#).unwrap();
+        db.put_doc("board", None, "{}").unwrap();
+        assert_eq!(db.docs("scene").unwrap().len(), 2);
+
+        db.put_doc("scene", Some(a), r#"{"name":"Inn"}"#).unwrap();
+        assert_eq!(db.doc(a).unwrap().unwrap(), ("scene".into(), r#"{"name":"Inn"}"#.into()));
+        // The kind must match, and the document must exist.
+        assert!(db.put_doc("board", Some(a), "{}").is_err());
+        assert!(db.put_doc("scene", Some(999), "{}").is_err());
+
+        db.delete_doc(b).unwrap();
+        assert_eq!(db.docs("scene").unwrap().len(), 1);
+        assert!(db.doc(b).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_old_library_is_backed_up_before_it_is_upgraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        {
+            // A version-1 library with one folder in it.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute("INSERT INTO folders (path, added_at) VALUES ('/old', 0)", [])
+                .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(db.folders().unwrap().len(), 1);
+
+        let backup = dir.path().join("library.backup-v1.db");
+        assert!(backup.exists());
+        let old = Connection::open(&backup).unwrap();
+        let version: i64 = old.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 1);
+        let folders: i64 = old.query_row("SELECT COUNT(*) FROM folders", [], |r| r.get(0)).unwrap();
+        assert_eq!(folders, 1);
+
+        // Opening again changes nothing and makes no second backup.
+        drop(db);
+        Db::open(&path).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().filter(|e| {
+            e.as_ref().unwrap().file_name().to_string_lossy().contains("backup")
+        }).count(), 1);
     }
 }

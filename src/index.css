@@ -44,13 +44,6 @@ body {
   cursor: default;
 }
 
-input,
-button,
-select {
-  font: inherit;
-  color: inherit;
-}
-
 button:not(:disabled),
 select {
   cursor: pointer;

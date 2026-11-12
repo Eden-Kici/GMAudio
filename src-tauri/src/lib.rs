@@ -12,10 +12,16 @@ use gmaudio_core::engine::{
 use gmaudio_core::library::{Library, LibraryEvent, ScanStatus};
 use gmaudio_core::model::{AnalysisStatus, Asset, Folder, Tag};
 use gmaudio_core::search::{Query, SearchResult};
+use include_dir::{Dir, include_dir};
 use serde::Serialize;
-use tauri::{Emitter, Manager, State};
+use serde_json::Value;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const MIXER_SETTINGS_KEY: &str = "mixer";
+
+/// The built-in sounds, compiled into the app.
+static STARTER_SOUNDS: Dir = include_dir!("$CARGO_MANIFEST_DIR/starter-sounds");
+const STARTER_FOLDER: &str = "Starter Sounds";
 
 struct AppState {
     library: Library,
@@ -39,6 +45,7 @@ fn save_mixer(state: &AppState) {
         slot.volume = c.volume;
         slot.muted = c.muted;
         slot.fade_ms = c.fade_ms;
+        slot.loop_queue = c.loop_queue;
     }
     if let Ok(json) = serde_json::to_string(&settings) {
         let _ = state.library.set_setting(MIXER_SETTINGS_KEY, &json);
@@ -104,6 +111,69 @@ fn library_tags(state: State<'_, AppState>) -> CmdResult<Vec<TagCount>> {
         .collect())
 }
 
+#[tauri::command(async)]
+fn library_set_tag_on(
+    state: State<'_, AppState>,
+    asset_ids: Vec<i64>,
+    tag: Tag,
+    on: bool,
+) -> CmdResult<()> {
+    state.library.set_tag_on(&asset_ids, &tag, on).map_err(msg)
+}
+
+/// Copies the built-in sounds into the app's data folder and adds that
+/// folder to the library. Safe to run again: missing files are restored.
+#[tauri::command(async)]
+fn library_add_starter_sounds(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let target = app.path().app_data_dir().map_err(msg)?.join(STARTER_FOLDER);
+    std::fs::create_dir_all(&target).map_err(msg)?;
+    STARTER_SOUNDS.extract(&target).map_err(msg)?;
+    match state.library.add_folder(&target) {
+        Ok(_) => Ok(()),
+        Err(gmaudio_core::Error::FolderAlreadyAdded) => state.library.rescan(None).map_err(msg),
+        Err(e) => Err(msg(e)),
+    }
+}
+
+// ---- saved interface state and documents -----------------------------------
+
+#[tauri::command(async)]
+fn ui_get(state: State<'_, AppState>, key: String) -> CmdResult<Option<String>> {
+    state.library.get_setting(&format!("ui.{key}")).map_err(msg)
+}
+
+#[tauri::command(async)]
+fn ui_set(state: State<'_, AppState>, key: String, value: String) -> CmdResult<()> {
+    state.library.set_setting(&format!("ui.{key}"), &value).map_err(msg)
+}
+
+#[derive(Serialize)]
+struct Doc {
+    id: i64,
+    data: Value,
+}
+
+#[tauri::command(async)]
+fn doc_list(state: State<'_, AppState>, kind: String) -> CmdResult<Vec<Doc>> {
+    Ok(state
+        .library
+        .docs(&kind)
+        .map_err(msg)?
+        .into_iter()
+        .filter_map(|(id, json)| Some(Doc { id, data: serde_json::from_str(&json).ok()? }))
+        .collect())
+}
+
+#[tauri::command(async)]
+fn doc_save(state: State<'_, AppState>, kind: String, id: Option<i64>, data: Value) -> CmdResult<i64> {
+    state.library.put_doc(&kind, id, &data.to_string()).map_err(msg)
+}
+
+#[tauri::command(async)]
+fn doc_delete(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    state.library.delete_doc(id).map_err(msg)
+}
+
 // ---- engine ----------------------------------------------------------------
 
 #[tauri::command(async)]
@@ -117,6 +187,7 @@ fn engine_play(
     asset_id: i64,
     channel: Channel,
     looping: Option<bool>,
+    interrupt: Option<bool>,
 ) -> CmdResult<u64> {
     let asset = state
         .library
@@ -142,6 +213,7 @@ fn engine_play(
             gain_db: asset.gain_db as f32,
             duration_ms: asset.duration_ms,
             looping,
+            interrupt: interrupt.unwrap_or(false),
         })
         .map_err(msg)
 }
@@ -186,6 +258,28 @@ fn engine_set_master(state: State<'_, AppState>, volume: f32) -> CmdResult<()> {
     state.engine.set_master_volume(volume).map_err(msg)?;
     save_mixer(&state);
     Ok(())
+}
+
+#[tauri::command(async)]
+fn engine_set_sound_looping(state: State<'_, AppState>, id: u64, looping: bool) -> CmdResult<()> {
+    state.engine.set_sound_looping(id, looping).map_err(msg)
+}
+
+#[tauri::command(async)]
+fn engine_set_loop_queue(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
+    state.engine.set_loop_queue(on).map_err(msg)?;
+    save_mixer(&state);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn engine_next_track(state: State<'_, AppState>) -> CmdResult<()> {
+    state.engine.next_track().map_err(msg)
+}
+
+#[tauri::command(async)]
+fn engine_play_queued_now(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
+    state.engine.play_queued_now(id).map_err(msg)
 }
 
 #[tauri::command(async)]
@@ -242,13 +336,24 @@ pub fn run() {
             library_search,
             library_status,
             library_set_tags,
+            library_set_tag_on,
+            library_add_starter_sounds,
             library_tags,
+            ui_get,
+            ui_set,
+            doc_list,
+            doc_save,
+            doc_delete,
             engine_state,
             engine_play,
             engine_stop_sound,
             engine_stop_channel,
             engine_set_channel,
             engine_set_master,
+            engine_set_sound_looping,
+            engine_set_loop_queue,
+            engine_next_track,
+            engine_play_queued_now,
             engine_panic,
             engine_retry_device,
             engine_command_log,

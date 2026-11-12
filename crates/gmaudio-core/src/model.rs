@@ -94,3 +94,71 @@ pub struct Analysis {
     pub loudness_lufs: Option<f64>,
     pub gain_db: f64,
 }
+
+/// The four tags that say which mixer channel a sound belongs on, in
+/// channel order. A sound with exactly one of them plays there with a
+/// single click.
+pub const CHANNEL_TAGS: [&str; 4] = ["Music", "Ambience", "Sound effects", "Stinger"];
+pub const CHANNEL_TAG_CATEGORY: &str = "channel";
+
+/// Guesses a channel tag from the folders a file sits in, deepest folder
+/// first: `...\\Sounds\\Ambience\\Rain\\light.ogg` is ambience.
+///
+/// Only folder names count. File names are too varied to trust
+/// ("Music Box Creak" is not music).
+pub fn guess_channel_tag(path: &str) -> Option<&'static str> {
+    let parts: Vec<&str> = path.split(['\\', '/']).collect();
+    let folders = parts.len().saturating_sub(1);
+    for folder in parts[..folders].iter().rev() {
+        let name = folder.to_lowercase();
+        let words: Vec<&str> = name
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+        let has = |needle: &str| name.contains(needle);
+        let word = |w: &str| words.contains(&w);
+        if has("sting") || has("jingle") || has("fanfare") {
+            return Some(CHANNEL_TAGS[3]);
+        }
+        if has("ambien") || has("ambian") || has("atmos") || has("soundscape")
+            || has("background") || has("weather") || has("nature") || has("environment")
+        {
+            return Some(CHANNEL_TAGS[1]);
+        }
+        if word("sfx") || word("fx") || word("foley") || has("sound effect")
+            || has("soundeffect") || has("effects") || has("one shot") || has("oneshot")
+            || has("one-shot")
+        {
+            return Some(CHANNEL_TAGS[2]);
+        }
+        if has("music") || has("song") || has("soundtrack") || word("ost") || word("bgm")
+            || word("score") || word("scores") || word("theme") || word("themes")
+        {
+            return Some(CHANNEL_TAGS[0]);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guesses_channel_from_folder_names() {
+        let g = guess_channel_tag;
+        assert_eq!(g(r"C:\Sounds\Music\Taverns\reel.mp3"), Some("Music"));
+        assert_eq!(g(r"C:\Sounds\Ambience\rain.ogg"), Some("Ambience"));
+        assert_eq!(g(r"C:\Sounds\Ambiance\Weather\rain.ogg"), Some("Ambience"));
+        assert_eq!(g("/home/x/SFX/sword.wav"), Some("Sound effects"));
+        assert_eq!(g(r"D:\Audio\Sound Effects\door.wav"), Some("Sound effects"));
+        assert_eq!(g(r"D:\Audio\Stingers\win.wav"), Some("Stinger"));
+        assert_eq!(g(r"D:\OST\Disc 1\01.flac"), Some("Music"));
+        // The deepest folder wins.
+        assert_eq!(g(r"C:\Music\Battle\Stingers\hit.wav"), Some("Stinger"));
+        // File names do not count, and short words must match whole.
+        assert_eq!(g(r"C:\Stuff\Music Box Creak.wav"), None);
+        assert_eq!(g(r"C:\Ghost Town\Frost\wind.wav"), None);
+        assert_eq!(g("no-folders.wav"), None);
+    }
+}

@@ -12,10 +12,14 @@ export async function pickFolder(): Promise<string | null> {
 
 export function Sidebar() {
   const folders = useStore((s) => s.folders);
-  const filter = useStore((s) => s.folderFilter);
+  const activePane = useStore((s) => s.activePane);
+  const filter = useStore((s) => s.panes.find((p) => p.id === s.activePane)?.folderId ?? null);
   const librarySize = useStore((s) => s.librarySize);
-  const setFilter = useStore((s) => s.setFolderFilter);
+  const setPaneFolder = useStore((s) => s.setPaneFolder);
   const addFolder = useStore((s) => s.addFolder);
+  const addStarterSounds = useStore((s) => s.addStarterSounds);
+  const setFilter = (id: number | null) => setPaneFolder(activePane, id);
+  const hasStarter = folders.some((f) => /[\\/]Starter Sounds$/i.test(f.path));
 
   const add = async () => {
     const path = await pickFolder();
@@ -51,6 +55,15 @@ export function Sidebar() {
         >
           <PlusIcon /> Add folder
         </button>
+        {!hasStarter && (
+          <button
+            onClick={() => void addStarterSounds()}
+            title="Adds a small set of built-in music, ambience, effects and stingers"
+            className="mt-1.5 h-8 w-full rounded-md text-xs font-medium text-dim hover:bg-raised hover:text-ink"
+          >
+            Add the built-in sounds
+          </button>
+        )}
         <p className="mt-2 text-center text-[11px] leading-snug text-faint">
           MP3, OGG, FLAC and WAV. New files in these folders are picked up automatically.
         </p>
