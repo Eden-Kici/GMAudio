@@ -1,0 +1,21 @@
+[package]
+name = "gmaudio"
+version = "0.1.0"
+description = "Audio control center for running tabletop RPG sessions"
+authors = ["Eden Kici"]
+edition = "2024"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name (needed on Windows).
+name = "gmaudio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+gmaudio-core = { path = "../crates/gmaudio-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["src-tauri", "crates/gmaudio-core"]
+
+# Audio decoding and mixing are far too slow unoptimized: `tauri dev` would
+# stutter. Optimize the audio path even in dev builds.
+[profile.dev.package.gmaudio-core]
+opt-level = 3
+[profile.dev.package.kira]
+opt-level = 3
+[profile.dev.package.cpal]
+opt-level = 3
+[profile.dev.package.rtrb]
+opt-level = 3
+[profile.dev.package.ebur128]
+opt-level = 3
+[profile.dev.package.symphonia]
+opt-level = 3
+[profile.dev.package.symphonia-core]
+opt-level = 3
+[profile.dev.package.symphonia-common]
+opt-level = 3
+[profile.dev.package.symphonia-metadata]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+[profile.dev.package.symphonia-format-riff]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
