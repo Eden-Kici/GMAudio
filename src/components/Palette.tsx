@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, assetChannels, channelInfo, type Asset } from "../api";
 import { activateScene, triggerPad } from "../actions";
-import { useDocs } from "../docs";
+import { useScoped } from "../docs";
 import { useStore } from "../store";
 import { SearchIcon } from "./icons";
 
@@ -16,8 +16,8 @@ interface Item {
 
 /** Ctrl+K: type a few letters, press Enter, and it plays. */
 export function Palette({ onClose }: { onClose: () => void }) {
-  const scenes = useDocs((s) => s.scenes);
-  const boards = useDocs((s) => s.boards);
+  const scenes = useScoped("scenes");
+  const boards = useScoped("boards");
   const play = useStore((s) => s.play);
   const [query, setQuery] = useState("");
   const [sounds, setSounds] = useState<Asset[]>([]);

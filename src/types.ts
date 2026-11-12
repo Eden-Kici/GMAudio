@@ -35,6 +35,38 @@ export interface Scene {
   board_id: number | null;
   /** The campaign this scene belongs to. `null`: shared by all. */
   campaign_id: number | null;
+  /** Set to show it in one session only. */
+  session_id?: number | null;
+}
+
+export interface Campaign {
+  name: string;
+}
+
+/** One step of a session's running order. */
+export type CueAction =
+  | { type: "scene"; id: number }
+  | { type: "tier"; tier: number; label: string }
+  | { type: "stinger"; asset_id: number; quantize: Quantize; then_tier: number | null }
+  | { type: "pad"; board: number; pad: number }
+  | { type: "sound"; asset_id: number; channel: Channel }
+  | { type: "stop"; channel: Channel | "all"; fade_ms: number };
+
+export interface Cue {
+  action: CueAction;
+  /** A reminder for the GM: "Party enters the crypt". */
+  note: string;
+  state?: "done" | "skipped";
+}
+
+/** One game night. */
+export interface Session {
+  name: string;
+  campaign_id: number;
+  notes: string;
+  cues: Cue[];
+  /** Index of the cue GO fires next. */
+  position: number;
 }
 
 /** One intensity level of a piece of dynamic music. */
@@ -77,6 +109,7 @@ export interface MusicSet {
   stems: Stem[];
   stingers: Stinger[];
   campaign_id: number | null;
+  session_id?: number | null;
 }
 
 export type PadMode = "oneshot" | "loop" | "hold";
@@ -102,6 +135,7 @@ export interface Board {
   columns: number;
   pads: Pad[];
   campaign_id: number | null;
+  session_id?: number | null;
 }
 
 /** What a hotkey does. */

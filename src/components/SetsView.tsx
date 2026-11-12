@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type Doc, type Quantize } from "../api";
 import { playSet, playStinger } from "../actions";
-import { assetName, useDocs } from "../docs";
+import { assetName, useDocs, useScoped } from "../docs";
+import { MoreOptions, ScopeField } from "./Campaigns";
 import { useStore } from "../store";
 import { newSet, type MusicSet, type Stinger, type Tier } from "../types";
 import { ArrowIcon, CloseIcon, PencilIcon, PlusIcon } from "./icons";
@@ -89,7 +90,8 @@ function TapTempo({ onTempo }: { onTempo: (bpm: number) => void }) {
 }
 
 export function SetsView() {
-  const sets = useDocs((s) => s.sets);
+  const sets = useScoped("sets");
+  const campaignId = useDocs((s) => s.campaignId);
   const save = useDocs((s) => s.save);
   const playing = useStore((s) => s.engine?.music_set?.id ?? null);
   const [editing, setEditing] = useState<number | null>(null);
@@ -100,7 +102,7 @@ export function SetsView() {
       <div className="min-w-0 flex-1 overflow-y-auto p-5">
         <div className="mb-4 flex items-center gap-2">
           <h1 className="mr-auto text-lg font-semibold">Dynamic music</h1>
-          <button onClick={async () => setEditing(await save("set", null, newSet(`Music ${sets.length + 1}`)))} className={primaryClass}>
+          <button onClick={async () => setEditing(await save("set", null, { ...newSet(`Music ${sets.length + 1}`), campaign_id: campaignId }))} className={primaryClass}>
             <PlusIcon /> New music set
           </button>
         </div>
@@ -391,6 +393,9 @@ function SetEditor({ set, onClose }: { set: Doc<MusicSet>; onClose: () => void }
         <Field label="Colour">
           <ColorPicker value={data.color} onChange={(color) => update({ color })} />
         </Field>
+
+        <ScopeField value={data} onChange={update} />
+        <MoreOptions />
       </div>
 
       <div className="flex items-center justify-between border-t border-line px-4 py-3">

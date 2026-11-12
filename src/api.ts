@@ -245,7 +245,9 @@ export const api = {
   setSoundTrim: (id: number, trimDb: number) => invoke<void>("engine_set_sound_trim", { id, trimDb }),
   setDuckDb: (db: number) => invoke<void>("engine_set_duck_db", { db }),
   stopSound: (id: number) => invoke<void>("engine_stop_sound", { id }),
-  stopChannel: (channel: Channel) => invoke<void>("engine_stop_channel", { channel }),
+  stopChannel: (channel: Channel, fadeMs?: number) => invoke<void>("engine_stop_channel", { channel, fadeMs: fadeMs ?? null }),
+  outputDevices: () => invoke<{ devices: string[]; selected: string | null }>("engine_output_devices"),
+  setOutputDevice: (name: string | null) => invoke<void>("engine_set_output_device", { name }),
   setChannel: (channel: Channel, change: { volume?: number; muted?: boolean; fadeMs?: number; solo?: boolean }) =>
     invoke<void>("engine_set_channel", { channel, ...change }),
   setMaster: (volume: number) => invoke<void>("engine_set_master", { volume }),

@@ -19,6 +19,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const MIXER_SETTINGS_KEY: &str = "mixer";
+const OUTPUT_DEVICE_KEY: &str = "output_device";
 
 /// The built-in sounds, compiled into the app.
 static STARTER_SOUNDS: Dir = include_dir!("$CARGO_MANIFEST_DIR/starter-sounds");
@@ -305,6 +306,28 @@ fn stinger_play(
     state.engine.play_stinger(request, quantize.unwrap_or(Quantize::Beat), then_tier).map_err(msg)
 }
 
+#[derive(Serialize)]
+struct OutputDevices {
+    devices: Vec<String>,
+    /// `None`: follow the system default.
+    selected: Option<String>,
+}
+
+#[tauri::command(async)]
+fn engine_output_devices(state: State<'_, AppState>) -> CmdResult<OutputDevices> {
+    Ok(OutputDevices {
+        devices: gmaudio_core::engine::output_devices(),
+        selected: state.library.get_setting(OUTPUT_DEVICE_KEY).map_err(msg)?.filter(|d| !d.is_empty()),
+    })
+}
+
+/// Plays through another output from now on. `None` follows the system default.
+#[tauri::command(async)]
+fn engine_set_output_device(state: State<'_, AppState>, name: Option<String>) -> CmdResult<()> {
+    state.library.set_setting(OUTPUT_DEVICE_KEY, name.as_deref().unwrap_or("")).map_err(msg)?;
+    state.engine.set_output_device(name).map_err(msg)
+}
+
 #[tauri::command(async)]
 fn engine_set_sound_trim(state: State<'_, AppState>, id: u64, trim_db: f32) -> CmdResult<()> {
     state.engine.set_sound_trim(id, trim_db).map_err(msg)
@@ -424,7 +447,8 @@ pub fn run() {
                 .and_then(|json| serde_json::from_str::<MixerSettings>(&json).ok())
                 .unwrap_or_default();
             let handle = app.handle().clone();
-            let engine = Engine::spawn(settings, move |state| {
+            let device = library.get_setting(OUTPUT_DEVICE_KEY).ok().flatten().filter(|d| !d.is_empty());
+            let engine = Engine::spawn(settings, device, move |state| {
                 let _ = handle.emit("engine://state", state);
             });
 
@@ -462,6 +486,8 @@ pub fn run() {
             engine_preload,
             engine_set_sound_trim,
             engine_set_duck_db,
+            engine_output_devices,
+            engine_set_output_device,
             scene_apply,
             set_play,
             set_tier,

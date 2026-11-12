@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { CHANNELS, type Doc } from "../api";
 import { DEFAULT_PAD_KEYS, padTag, preloadBoards, setHotkey, setVisibleBoard, triggerPad } from "../actions";
-import { useDocs } from "../docs";
+import { useDocs, useScoped } from "../docs";
+import { MoreOptions, ScopeField } from "./Campaigns";
 import { useStore } from "../store";
 import { newBoard, newPad, type Board, type Pad } from "../types";
 import { CloseIcon, LoopIcon, PencilIcon, PlusIcon } from "./icons";
@@ -91,7 +92,8 @@ export function PadGrid({ board, editing, onEdit }: { board: Doc<Board>; editing
 }
 
 export function BoardsView() {
-  const boards = useDocs((s) => s.boards);
+  const boards = useScoped("boards");
+  const campaignId = useDocs((s) => s.campaignId);
   const save = useDocs((s) => s.save);
   const remove = useDocs((s) => s.remove);
   const [selected, setSelected] = useState<number | null>(null);
@@ -106,7 +108,7 @@ export function BoardsView() {
   useEffect(() => preloadBoards(boards), [boards]);
 
   const create = async () => {
-    const id = await save("board", null, newBoard(`Board ${boards.length + 1}`));
+    const id = await save("board", null, { ...newBoard(`Board ${boards.length + 1}`), campaign_id: campaignId });
     setSelected(id);
     setEditing(true);
   };
@@ -181,6 +183,9 @@ export function BoardsView() {
                     ))}
                   </select>
                 </label>
+                <div className="w-72">
+                  <ScopeField value={board.data} onChange={(scope) => void save("board", board.id, { ...board.data, ...scope })} />
+                </div>
                 <span className="ml-auto">
                   <ConfirmButton
                     label="Delete board"
@@ -307,6 +312,7 @@ function PadEditor({ board, index, onClose }: { board: Doc<Board>; index: number
             fallback={DEFAULT_PAD_KEYS[index]}
           />
         </Field>
+        <MoreOptions />
       </div>
       <div className="flex items-center justify-between border-t border-line px-4 py-3">
         <ConfirmButton

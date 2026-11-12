@@ -3,7 +3,8 @@ import { describeAction } from "../actions";
 import { useDocs } from "../docs";
 import { useStore } from "../store";
 import { CloseIcon } from "./icons";
-import { Field, Slider, Toggle } from "./ui";
+import { OutputDevice } from "./Setup";
+import { buttonClass, Field, Slider, Toggle } from "./ui";
 
 export function SettingsView() {
   const advanced = useDocs((s) => s.advanced);
@@ -11,6 +12,7 @@ export function SettingsView() {
   const hotkeys = useDocs((s) => s.hotkeys);
   const setHotkeys = useDocs((s) => s.setHotkeys);
   const duckDb = useStore((s) => s.engine?.duck_db ?? -8);
+  const setSetupDone = useDocs((s) => s.setSetupDone);
 
   return (
     <main className="min-w-0 flex-1 overflow-y-auto p-5">
@@ -27,6 +29,9 @@ export function SettingsView() {
         </section>
 
         <section className="space-y-4 rounded-xl bg-panel p-4">
+          <Field label="Sound comes out of" hint="Changing this stops whatever is playing">
+            <OutputDevice />
+          </Field>
           <Field label="Lower music during stingers" hint="Also for pads set to lower the music">
             <Slider
               value={duckDb}
@@ -46,6 +51,8 @@ export function SettingsView() {
                 ["Esc", "Stop all: fade out. Press twice to cut."],
                 ["1 to 0", "Press the first ten pads of the board on screen"],
                 ["F1 to F12", "Switch to the first twelve scenes"],
+                ["Space", "GO: fire the next cue of the session"],
+                ["Page Up / Down", "Dynamic music: one level up or down"],
                 ["Ctrl+K", "Find and fire anything by name"],
                 ["/", "Search the library"],
               ].map(([key, what]) => (
@@ -76,6 +83,12 @@ export function SettingsView() {
               ))}
             </ul>
           </Field>
+        </section>
+        <section className="flex items-center justify-between rounded-xl bg-panel p-4">
+          <span className="text-sm text-dim">Walk through first-time setup again, including the example scenes.</span>
+          <button onClick={() => setSetupDone(false)} className={buttonClass}>
+            Run setup
+          </button>
         </section>
       </div>
     </main>

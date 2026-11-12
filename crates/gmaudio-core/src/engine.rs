@@ -1219,6 +1219,8 @@ pub enum Command {
     SetTier { tier: usize, quantize: Option<Quantize> },
     StepTier { delta: i32 },
     PlayStinger { request: PlayRequest, quantize: Quantize, then_tier: Option<usize> },
+    /// Close the audio output and open it again (after choosing another).
+    Reopen,
     Panic,
     /// Try to open the audio device again right now.
     RetryDevice,
@@ -1244,18 +1246,43 @@ type StateSink = Box<dyn Fn(&EngineState) + Send>;
 pub struct Engine {
     tx: Sender<Msg>,
     thread: Option<JoinHandle<()>>,
+    /// The chosen audio output's name, read each time the device is opened.
+    device: Option<Arc<std::sync::Mutex<Option<String>>>>,
 }
 
 impl Engine {
-    /// Starts the engine on the default audio output.
+    /// Starts the engine on an audio output: the one named, or the
+    /// system default when `device` is `None` or no longer plugged in.
     ///
     /// `on_state` is called from the engine thread whenever the state
     /// changes (up to ~30 times a second while something is playing).
-    pub fn spawn(settings: MixerSettings, on_state: impl Fn(&EngineState) + Send + 'static) -> Self {
-        Self::spawn_with(settings, on_state, || {
-            AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
+    pub fn spawn(
+        settings: MixerSettings,
+        device: Option<String>,
+        on_state: impl Fn(&EngineState) + Send + 'static,
+    ) -> Self {
+        let chosen = Arc::new(std::sync::Mutex::new(device));
+        let for_thread = chosen.clone();
+        let mut engine = Self::spawn_with(settings, on_state, move || {
+            let wanted = for_thread.lock().unwrap().clone();
+            let backend_settings = kira::backend::cpal::CpalBackendSettings {
+                device: wanted.as_deref().and_then(find_output_device),
+                ..Default::default()
+            };
+            AudioManager::<DefaultBackend>::new(AudioManagerSettings { backend_settings, ..Default::default() })
                 .map_err(|e| e.to_string())
-        })
+        });
+        engine.device = Some(chosen);
+        engine
+    }
+
+    /// Switches to another audio output (`None`: the system default).
+    /// Everything that is playing stops.
+    pub fn set_output_device(&self, name: Option<String>) -> Result<()> {
+        if let Some(device) = &self.device {
+            *device.lock().unwrap() = name;
+        }
+        self.send(Command::Reopen).map(|_| ())
     }
 
     /// Like [`Engine::spawn`], with a custom way of opening the device.
@@ -1305,7 +1332,10 @@ impl Engine {
                             }
                             log.push_back(format!("{:>10.3}s {cmd:?}", started.elapsed().as_secs_f64()));
 
-                            if matches!(cmd, Command::RetryDevice) {
+                            if matches!(cmd, Command::Reopen) {
+                                mixer = None;
+                            }
+                            if matches!(cmd, Command::RetryDevice | Command::Reopen) {
                                 last_attempt = None;
                                 let _ = reply.send(Ok(Reply::Done));
                                 continue;
@@ -1346,6 +1376,7 @@ impl Engine {
         Self {
             tx,
             thread: Some(thread),
+            device: None,
         }
     }
 
@@ -1565,8 +1596,29 @@ fn run<B: Backend>(mixer: &mut Mixer<B>, command: Command) -> Result<Reply> {
             mixer.play_stinger(request, quantize, then_tier).map(Reply::Started)
         }
         Command::Panic => Ok(Reply::Panic(mixer.panic())),
-        Command::RetryDevice => Ok(Reply::Done),
+        Command::RetryDevice | Command::Reopen => Ok(Reply::Done),
     }
+}
+
+/// The names of the audio outputs on this computer.
+pub fn output_devices() -> Vec<String> {
+    use kira::backend::cpal::cpal::traits::{DeviceTrait, HostTrait};
+    let host = kira::backend::cpal::cpal::default_host();
+    let Ok(devices) = host.output_devices() else { return Vec::new() };
+    let mut names: Vec<String> = devices
+        .filter_map(|d| d.description().ok().map(|d| d.name().to_string()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn find_output_device(name: &str) -> Option<kira::backend::cpal::cpal::Device> {
+    use kira::backend::cpal::cpal::traits::{DeviceTrait, HostTrait};
+    kira::backend::cpal::cpal::default_host()
+        .output_devices()
+        .ok()?
+        .find(|d| d.description().is_ok_and(|d| d.name() == name))
 }
 
 fn run_offline(
@@ -1618,7 +1670,8 @@ fn run_offline(
         | Command::SetSoundLooping { .. }
         | Command::NextTrack
         | Command::PlayQueuedNow { .. }
-        | Command::RetryDevice => Ok(Reply::Done),
+        | Command::RetryDevice
+        | Command::Reopen => Ok(Reply::Done),
     }
 }
 

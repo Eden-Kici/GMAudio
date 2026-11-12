@@ -3,6 +3,7 @@ import { plural } from "../format";
 import { useStore } from "../store";
 import { Fader } from "./Fader";
 import { SearchIcon, StopIcon } from "./icons";
+import { CampaignPicker } from "./Campaigns";
 
 export function TopBar({ onPalette }: { onPalette: () => void }) {
   const master = useStore((s) => s.engine?.master_volume ?? 0.8);
@@ -19,6 +20,7 @@ export function TopBar({ onPalette }: { onPalette: () => void }) {
       </div>
 
       <ScanStatusPill />
+      <CampaignPicker />
 
       <button
         onClick={onPalette}

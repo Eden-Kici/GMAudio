@@ -2,9 +2,10 @@
 
 import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
 import { api, type Doc } from "./api";
-import { useDocs } from "./docs";
+import { scoped, useDocs } from "./docs";
 import { message, useStore } from "./store";
-import type { Action, Board, Hotkey, MusicSet, Pad, Scene, Stinger } from "./types";
+import { CHANNELS } from "./api";
+import type { Action, Board, Cue, Hotkey, MusicSet, Pad, Scene, Session, Stinger } from "./types";
 
 const notify = (e: unknown) => useStore.getState().notify(message(e));
 
@@ -150,20 +151,173 @@ export function defaultAction(combo: string): Action | null {
   if (pad >= 0 && visibleBoard && pad < visibleBoard.data.pads.length) {
     return { type: "pad", board: visibleBoard.id, pad };
   }
+  if (combo === "Space" && currentSession()?.data.cues.length) return { type: "go" };
   if (combo === "PageUp") return { type: "tier", delta: 1 };
   if (combo === "PageDown") return { type: "tier", delta: -1 };
   const fn = /^F(\d+)$/.exec(combo);
   if (fn) {
-    const scene = useDocs.getState().scenes[Number(fn[1]) - 1];
+    const scene = scoped("scenes")[Number(fn[1]) - 1];
     if (scene) return { type: "scene", id: scene.id };
   }
   return null;
 }
 
-/** Hooks other parts of the app fill in (cue list, dynamic music). */
+/** What the GO and music-intensity keys do. */
 export const handlers: { go?: () => void; tier?: (delta: number) => void } = {
+  go: () => go(),
   tier: (delta) => void api.setStep(delta).catch(notify),
 };
+
+// ---- cue list ----------------------------------------------------------------
+
+export function currentSession(): Doc<Session> | undefined {
+  const docs = useDocs.getState();
+  return docs.sessions.find((s) => s.id === docs.sessionId);
+}
+
+/** A cue in a few words, for the list and the "next up" strip. */
+export function describeCue(cue: Cue): string {
+  const docs = useDocs.getState();
+  const a = cue.action;
+  switch (a.type) {
+    case "scene":
+      return `Scene: ${docs.scenes.find((s) => s.id === a.id)?.data.name ?? "(deleted)"}`;
+    case "tier":
+      return `Music level: ${a.label || a.tier + 1}`;
+    case "stinger":
+      return `Stinger: ${docs.assets[a.asset_id]?.name ?? "…"}`;
+    case "pad": {
+      const pad = docs.boards.find((b) => b.id === a.board)?.data.pads[a.pad];
+      return `Pad: ${pad?.label || "(deleted)"}`;
+    }
+    case "sound":
+      return `Play: ${docs.assets[a.asset_id]?.name ?? "…"}`;
+    case "stop": {
+      const what = a.channel === "all" ? "everything" : CHANNELS.find((c) => c.id === a.channel)!.label.toLowerCase();
+      return a.fade_ms >= 1000 ? `Fade out ${what} over ${a.fade_ms / 1000} s` : `Stop ${what}`;
+    }
+  }
+}
+
+async function runCue(cue: Cue) {
+  const docs = useDocs.getState();
+  const a = cue.action;
+  try {
+    switch (a.type) {
+      case "scene": {
+        const scene = docs.scenes.find((s) => s.id === a.id);
+        if (scene) await activateScene(scene);
+        else notify("That cue's scene has been deleted.");
+        break;
+      }
+      case "tier":
+        await api.setTier(a.tier);
+        break;
+      case "stinger":
+        await api.stingerPlay(a.asset_id, { quantize: a.quantize, thenTier: a.then_tier });
+        break;
+      case "pad":
+        runAction({ type: "pad", board: a.board, pad: a.pad });
+        break;
+      case "sound":
+        await api.play(a.asset_id, a.channel);
+        break;
+      case "stop":
+        await Promise.all(
+          (a.channel === "all" ? CHANNELS.map((c) => c.id) : [a.channel]).map((channel) => api.stopChannel(channel, a.fade_ms)),
+        );
+        break;
+    }
+  } catch (e) {
+    notify(e);
+  }
+}
+
+const saveSession = (session: Doc<Session>, change: Partial<Session>) =>
+  void useDocs.getState().save("session", session.id, { ...session.data, ...change });
+
+/** GO: fires the next cue and moves on. */
+export function go() {
+  const session = currentSession();
+  if (!session) return;
+  const { cues, position } = session.data;
+  const cue = cues[position];
+  if (!cue) return;
+  void runCue(cue);
+  saveSession(session, {
+    cues: cues.map((c, i) => (i === position ? { ...c, state: "done" } : c)),
+    position: position + 1,
+  });
+}
+
+/** Passes over the next cue without firing it. It stays in the list, marked. */
+export function skipCue() {
+  const session = currentSession();
+  if (!session) return;
+  const { cues, position } = session.data;
+  if (!cues[position]) return;
+  saveSession(session, {
+    cues: cues.map((c, i) => (i === position ? { ...c, state: "skipped" } : c)),
+    position: position + 1,
+  });
+}
+
+/** Makes a cue the next one GO fires. */
+export function jumpToCue(index: number) {
+  const session = currentSession();
+  if (session) saveSession(session, { position: index });
+}
+
+/** Fires a cue out of order, leaving the running position where it is. */
+export function fireCue(index: number) {
+  const cue = currentSession()?.data.cues[index];
+  if (cue) void runCue(cue);
+}
+
+/** Back to the top, with every cue unmarked. */
+export function resetCues() {
+  const session = currentSession();
+  if (session) saveSession(session, { position: 0, cues: session.data.cues.map(({ state: _state, ...cue }) => cue) });
+}
+
+/** Copies a session (its cues and notes) as a starting point for the next one. */
+export async function duplicateSession(session: Doc<Session>): Promise<number> {
+  const docs = useDocs.getState();
+  const copyId = await docs.save("session", null, {
+    ...session.data,
+    name: `${session.data.name} (copy)`,
+    position: 0,
+    cues: session.data.cues.map(({ state: _state, ...cue }) => cue),
+  });
+  // Scenes, boards and music that belonged to that session only come along too.
+  const sceneIds = new Map<number, number>();
+  const boardIds = new Map<number, number>();
+  for (const board of docs.boards.filter((b) => b.data.session_id === session.id)) {
+    boardIds.set(board.id, await docs.save("board", null, { ...board.data, session_id: copyId }));
+  }
+  for (const set of docs.sets.filter((s) => s.data.session_id === session.id)) {
+    await docs.save("set", null, { ...set.data, session_id: copyId });
+  }
+  for (const scene of docs.scenes.filter((s) => s.data.session_id === session.id)) {
+    const board_id = scene.data.board_id !== null ? (boardIds.get(scene.data.board_id) ?? scene.data.board_id) : null;
+    sceneIds.set(scene.id, await docs.save("scene", null, { ...scene.data, session_id: copyId, board_id }));
+  }
+  if (sceneIds.size > 0 || boardIds.size > 0) {
+    const copy = useDocs.getState().sessions.find((s) => s.id === copyId);
+    if (copy) {
+      await docs.save("session", copyId, {
+        ...copy.data,
+        cues: copy.data.cues.map((cue) => {
+          const a = cue.action;
+          if (a.type === "scene" && sceneIds.has(a.id)) return { ...cue, action: { ...a, id: sceneIds.get(a.id)! } };
+          if (a.type === "pad" && boardIds.has(a.board)) return { ...cue, action: { ...a, board: boardIds.get(a.board)! } };
+          return cue;
+        }),
+      });
+    }
+  }
+  return copyId;
+}
 
 export function runAction(action: Action, phase: "down" | "up" = "down") {
   const docs = useDocs.getState();

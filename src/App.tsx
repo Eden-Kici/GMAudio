@@ -15,6 +15,9 @@ import { BoardsView } from "./components/BoardsView";
 import { SettingsView } from "./components/SettingsView";
 import { Palette } from "./components/Palette";
 import { SetsView } from "./components/SetsView";
+import { CuesView } from "./components/CuesView";
+import { PerformView } from "./components/PerformView";
+import { SetupWizard } from "./components/Setup";
 
 export default function App() {
   const init = useStore((s) => s.init);
@@ -23,6 +26,18 @@ export default function App() {
   const view = useDocs((s) => s.view);
   const hotkeys = useDocs((s) => s.hotkeys);
   const docsLoaded = useDocs((s) => s.loaded);
+  const setupDone = useDocs((s) => s.setupDone);
+  const foldersLoaded = useStore((s) => s.foldersLoaded);
+  const noFolders = useStore((s) => s.folders.length === 0);
+  // Setup shows on the very first launch, and when asked for in Settings.
+  // Someone who already has a library from an earlier version skips it.
+  const [checkedSetup, setCheckedSetup] = useState(false);
+  useEffect(() => {
+    if (!docsLoaded || !foldersLoaded || checkedSetup) return;
+    if (!setupDone && !noFolders) useDocs.getState().setSetupDone(true);
+    setCheckedSetup(true);
+  }, [docsLoaded, foldersLoaded, setupDone, noFolders, checkedSetup]);
+  const inSetup = checkedSetup && !setupDone;
   const [palette, setPalette] = useState(false);
 
   useEffect(() => {
@@ -101,12 +116,15 @@ export default function App() {
         {view === "scenes" && <ScenesView />}
         {view === "boards" && <BoardsView />}
         {view === "sets" && <SetsView />}
+        {view === "cues" && <CuesView />}
+        {view === "perform" && <PerformView />}
         {view === "settings" && <SettingsView />}
       </div>
       <Mixer />
       <Notice />
       <ContextMenu />
       {palette && <Palette onClose={() => setPalette(false)} />}
+      {inSetup && <SetupWizard />}
     </div>
   );
 }

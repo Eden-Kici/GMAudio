@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { Doc } from "../api";
 import { activateScene, DEFAULT_PAD_KEYS, hotkeyFor, sceneFromCurrentMix, setHotkey } from "../actions";
-import { assetName, useDocs } from "../docs";
+import { assetName, useDocs, useScoped } from "../docs";
+import { MoreOptions, ScopeField } from "./Campaigns";
 import { useStore } from "../store";
 import { newScene, type RandomLayer, type Scene } from "../types";
 import { CloseIcon, PencilIcon, PlusIcon } from "./icons";
@@ -67,13 +68,14 @@ export function SceneTile({ scene, index, onEdit }: { scene: Doc<Scene>; index: 
 }
 
 export function ScenesView() {
-  const scenes = useDocs((s) => s.scenes);
+  const scenes = useScoped("scenes");
+  const campaignId = useDocs((s) => s.campaignId);
   const save = useDocs((s) => s.save);
   const anythingPlaying = useStore((s) => (s.engine?.sounds.length ?? 0) > 0);
   const [editing, setEditing] = useState<number | null>(null);
   const edited = scenes.find((s) => s.id === editing);
 
-  const create = async (scene: Scene) => setEditing(await save("scene", null, scene));
+  const create = async (scene: Scene) => setEditing(await save("scene", null, { ...scene, campaign_id: campaignId, session_id: null }));
 
   return (
     <main className="flex min-h-0 min-w-0 flex-1">
@@ -119,10 +121,10 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
   const advanced = useDocs((s) => s.advanced);
   const assets = useDocs((s) => s.assets);
   const needAssets = useDocs((s) => s.needAssets);
-  const boards = useDocs((s) => s.boards);
-  const sets = useDocs((s) => s.sets);
+  const boards = useScoped("boards");
+  const sets = useScoped("sets");
   const hotkey = useDocs((s) => s.hotkeys.find((h) => h.action.type === "scene" && h.action.id === scene.id));
-  const index = useDocs((s) => s.scenes.findIndex((x) => x.id === scene.id));
+  const index = useScoped("scenes").findIndex((x) => x.id === scene.id);
   const [addingLayer, setAddingLayer] = useState(false);
   const data = scene.data;
   const set = (change: Partial<Scene>) => void save("scene", scene.id, { ...data, ...change });
@@ -338,6 +340,9 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
             fallback={index >= 0 && index < 12 ? `F${index + 1}` : undefined}
           />
         </Field>
+
+        <ScopeField value={data} onChange={set} />
+        <MoreOptions />
       </div>
 
       <div className="flex items-center justify-between border-t border-line px-4 py-3">

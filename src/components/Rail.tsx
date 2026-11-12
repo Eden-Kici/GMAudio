@@ -1,11 +1,13 @@
 import { useDocs, type View } from "../docs";
-import { GearIcon, GridIcon, LibraryIcon, SceneIcon, WaveIcon } from "./icons";
+import { BoltIcon, GearIcon, GridIcon, LibraryIcon, ListIcon, SceneIcon, WaveIcon } from "./icons";
 
 const ITEMS: { view: View; label: string; hint: string; icon: typeof GearIcon }[] = [
+  { view: "perform", label: "Play", hint: "Run the game: cues, scenes and pads on one screen", icon: BoltIcon },
   { view: "library", label: "Library", hint: "All your music and sounds", icon: LibraryIcon },
   { view: "scenes", label: "Scenes", hint: "Whole soundscapes on one button", icon: SceneIcon },
   { view: "boards", label: "Pads", hint: "Soundboard: effects on pads", icon: GridIcon },
   { view: "sets", label: "Music", hint: "Dynamic music that changes with the action", icon: WaveIcon },
+  { view: "cues", label: "Cues", hint: "A session's running order, fired with Space", icon: ListIcon },
   { view: "settings", label: "Settings", hint: "Keys and options", icon: GearIcon },
 ];
 
