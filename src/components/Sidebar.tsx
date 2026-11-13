@@ -5,6 +5,7 @@ import { folderName, plural } from "../format";
 import { useStore } from "../store";
 import { CloseIcon, FolderIcon, PlusIcon, RefreshIcon, SearchIcon, WarningIcon } from "./icons";
 import { OnlineSounds } from "./Online";
+import { YouTubeImport } from "./YouTube";
 
 export async function pickFolder(): Promise<string | null> {
   const picked = await open({ directory: true, multiple: false, title: "Choose a folder of music or sounds" });
@@ -22,6 +23,7 @@ export function Sidebar() {
   const setFilter = (id: number | null) => setPaneFolder(activePane, id);
   const hasStarter = folders.some((f) => /[\\/]Starter Sounds$/i.test(f.path));
   const [online, setOnline] = useState(false);
+  const [youtube, setYoutube] = useState(false);
 
   const add = async () => {
     const path = await pickFolder();
@@ -65,6 +67,14 @@ export function Sidebar() {
           <SearchIcon width={14} height={14} /> Find sounds online
         </button>
         {online && <OnlineSounds onClose={() => setOnline(false)} />}
+        <button
+          onClick={() => setYoutube(true)}
+          title="Paste a YouTube link to save its audio into your library"
+          className="flex h-9 w-full items-center justify-center gap-2 rounded-md text-sm font-medium text-dim hover:bg-raised hover:text-ink"
+        >
+          <PlusIcon width={14} height={14} /> Add from YouTube
+        </button>
+        {youtube && <YouTubeImport onClose={() => setYoutube(false)} />}
         {!hasStarter && (
           <button
             onClick={() => void addStarterSounds()}

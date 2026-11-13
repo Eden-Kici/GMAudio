@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, CHANNELS, type Channel, type ChannelState, type EmitterState, type QueuedState, type SoundState } from "../api";
 import { useDocs } from "../docs";
 import { SetPanel } from "./SetsView";
@@ -6,7 +6,7 @@ import { formatTime } from "../format";
 import { useStore } from "../store";
 import { DRAG_TYPE } from "./Browser";
 import { Fader } from "./Fader";
-import { CloseIcon, LoopIcon, NextIcon, PlayIcon, StopIcon, VolumeIcon } from "./icons";
+import { CloseIcon, LoopIcon, NextIcon, PauseIcon, PlayIcon, StopIcon, VolumeIcon } from "./icons";
 
 const FADES = [0, 150, 500, 1000, 2000, 3000, 5000, 8000, 12000];
 
@@ -202,7 +202,7 @@ function Strip({ id, label, hint, color, state, sounds, emitters, index }: Strip
         ) : (
           <>
             {sounds.map((s) => (
-              <Playing key={s.id} sound={s} color={color} />
+              <Playing key={s.id} sound={s} color={color} fade={fade} />
             ))}
             {emitters.map((e) => (
               <Emitter key={e.id} emitter={e} />
@@ -234,8 +234,70 @@ function LoopToggle({ id, on, name }: { id: number; on: boolean; name: string })
   );
 }
 
-function Playing({ sound, color }: { sound: SoundState; color: string }) {
+const QUEUE_DRAG = "application/x-gmaudio-queue";
+
+/** Pause or resume, at once or with a fade. Opens a two-line menu. */
+function PauseMenu({ sound, fade }: { sound: SoundState; fade: number }) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!at) return;
+    const close = () => setAt(null);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [at]);
+  const paused = sound.paused;
+  const go = (fadeMs: number) => {
+    setAt(null);
+    void api.pauseSound(sound.id, !paused, fadeMs);
+  };
+  const seconds = Math.max(0.5, fade / 1000);
+  const item = "block w-full px-3 py-1.5 text-left text-xs hover:bg-line";
+  return (
+    <>
+      <button
+        onClick={(e) => {
+          const box = e.currentTarget.getBoundingClientRect();
+          setAt(at ? null : { x: box.right, y: box.top });
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        aria-haspopup="menu"
+        aria-expanded={at !== null}
+        aria-label={paused ? `Resume ${sound.name}` : `Pause ${sound.name}`}
+        title={paused ? "Paused. Click to resume." : "Pause"}
+        className={`flex size-6 shrink-0 items-center justify-center rounded ${
+          paused ? "bg-ink/15 text-ink" : "text-dim hover:bg-line hover:text-ink"
+        }`}
+      >
+        {paused ? <PlayIcon width={10} height={10} /> : <PauseIcon width={10} height={10} />}
+      </button>
+      {at && (
+        <div
+          role="menu"
+          onPointerDown={(e) => e.stopPropagation()}
+          style={{ right: window.innerWidth - at.x, bottom: window.innerHeight - at.y + 4 }}
+          className="fixed z-50 w-44 overflow-hidden rounded-lg border border-line bg-raised py-1 shadow-xl"
+        >
+          <button role="menuitem" onClick={() => go(0)} className={item}>
+            {paused ? "Resume now" : "Pause now"}
+          </button>
+          <button role="menuitem" onClick={() => go(Math.round(seconds * 1000))} className={item}>
+            {paused ? `Fade back in (${seconds} s)` : `Fade out and pause (${seconds} s)`}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function Playing({ sound, color, fade }: { sound: SoundState; color: string; fade: number }) {
   const stop = useStore((s) => s.stopSound);
+  /** A queued track is being dragged over this one, to swap with it. */
+  const [swap, setSwap] = useState(false);
+  const takesSwap = sound.channel === "music" && !sound.stopping;
   const duration = sound.duration_ms;
   /** Where the pointer is while dragging along the bar, 0 to 1. */
   const [drag, setDrag] = useState<number | null>(null);
@@ -248,7 +310,25 @@ function Playing({ sound, color }: { sound: SoundState; color: string }) {
   };
 
   return (
-    <div className={`relative overflow-hidden rounded-md bg-raised ${sound.stopping ? "opacity-50" : ""}`}>
+    <div
+      onDragOver={(e) => {
+        if (!takesSwap || !e.dataTransfer.types.includes(QUEUE_DRAG)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        setSwap(true);
+      }}
+      onDragLeave={() => setSwap(false)}
+      onDrop={(e) => {
+        const id = Number(e.dataTransfer.getData(QUEUE_DRAG));
+        setSwap(false);
+        if (!takesSwap || !id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        void api.swapWithPlaying(id);
+      }}
+      className={`relative overflow-hidden rounded-md bg-raised ${sound.stopping ? "opacity-50" : ""} ${swap ? "ring-1 ring-accent" : ""}`}
+    >
       <span className="absolute inset-y-0 left-0 opacity-25" style={{ width: `${progress * 100}%`, background: color }} />
       {seekable && (
         <div
@@ -306,8 +386,9 @@ function Playing({ sound, color }: { sound: SoundState; color: string }) {
           />
         )}
         <span className="shrink-0 text-[11px] tabular-nums text-dim">
-          {sound.stopping ? "Fading out" : `${formatTime(drag !== null && duration ? drag * duration : sound.position_ms)} / ${formatTime(duration)}`}
+          {sound.stopping ? "Fading out" : swap ? "Drop to swap" : `${sound.paused ? "Paused · " : ""}${formatTime(drag !== null && duration ? drag * duration : sound.position_ms)} / ${formatTime(duration)}`}
         </span>
+        {seekable && <PauseMenu sound={sound} fade={fade} />}
         {!sound.stopping && <LoopToggle id={sound.id} on={sound.looping} name={sound.name} />}
         <button
           onClick={() => void stop(sound.id)}
@@ -344,8 +425,6 @@ function Emitter({ emitter }: { emitter: EmitterState }) {
     </div>
   );
 }
-
-const QUEUE_DRAG = "application/x-gmaudio-queue";
 
 function Queued({ item, index }: { item: QueuedState; index: number }) {
   const remove = useStore((s) => s.stopSound);

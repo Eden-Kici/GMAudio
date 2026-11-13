@@ -520,14 +520,21 @@ fn freesound_status(state: State<'_, AppState>) -> FreesoundStatus {
 #[tauri::command]
 fn freesound_set_credentials(state: State<'_, AppState>, client_id: String, api_key: String) -> FreesoundStatus {
     for (name, value) in [(FREESOUND_CLIENT_ID, client_id.trim()), (FREESOUND_API_KEY, api_key.trim())] {
-        if value.is_empty() {
-            secrets::delete(&state.library, name);
-        } else {
+        // An empty box means "leave it as it is".
+        if !value.is_empty() {
             secrets::set(&state.library, name, value);
         }
     }
     // Tokens belong to the old key.
     secrets::delete(&state.library, FREESOUND_TOKENS);
+    freesound_status(state)
+}
+
+#[tauri::command]
+fn freesound_remove_key(state: State<'_, AppState>) -> FreesoundStatus {
+    for name in [FREESOUND_CLIENT_ID, FREESOUND_API_KEY, FREESOUND_TOKENS] {
+        secrets::delete(&state.library, name);
+    }
     freesound_status(state)
 }
 
@@ -541,9 +548,7 @@ fn freesound_search(state: State<'_, AppState>, query: String, page: u32) -> Cmd
 #[tauri::command]
 fn freesound_open_sign_in(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     let credentials = freesound_credentials(&state)?;
-    app.opener()
-        .open_url(freesound::authorize_url(&credentials.client_id), None::<&str>)
-        .map_err(msg)
+    open_in_browser(&app, &freesound::authorize_url(&credentials.client_id))
 }
 
 #[tauri::command(async)]
@@ -592,7 +597,13 @@ fn freesound_download(
         .library
         .set_credit(&path_str, &sound.license, &sound.attribution())
         .map_err(msg)?;
-    match state.library.add_folder(&folder) {
+    let asset = add_download(&state, &folder, &path_str, channel_tag)?;
+    Ok(Downloaded { asset, original })
+}
+
+/// Brings a freshly downloaded file into the library and tags it for a channel.
+fn add_download(state: &AppState, folder: &Path, path: &str, channel_tag: Option<String>) -> CmdResult<Option<Asset>> {
+    match state.library.add_folder(folder) {
         Ok(_) => {}
         Err(gmaudio_core::Error::FolderAlreadyAdded) => {
             let id = state.library.folders().map_err(msg)?.into_iter().find(|f| Path::new(&f.path) == folder).map(|f| f.id);
@@ -601,8 +612,8 @@ fn freesound_download(
         Err(e) => return Err(msg(e)),
     }
     state.library.wait_idle(std::time::Duration::from_secs(120));
-    let asset = state.library.all_assets().map_err(msg)?.into_iter().find(|a| a.path == path_str);
-    let asset = match (asset, channel_tag) {
+    let asset = state.library.all_assets().map_err(msg)?.into_iter().find(|a| a.path == path);
+    Ok(match (asset, channel_tag) {
         (Some(asset), Some(tag)) if gmaudio_core::model::CHANNEL_TAGS.contains(&tag.as_str()) => {
             // Say where it belongs, replacing any guess made from the file's name.
             let mut tags: Vec<Tag> = asset
@@ -615,8 +626,63 @@ fn freesound_download(
             Some(state.library.set_tags(asset.id, &tags).map_err(msg)?)
         }
         (asset, _) => asset,
-    };
-    Ok(Downloaded { asset, original })
+    })
+}
+
+/// Opens a web address in the default browser.
+fn open_in_browser(app: &AppHandle, url: &str) -> CmdResult<()> {
+    // On Windows, go straight to the URL handler: a shell in between cuts
+    // the address off at the first "&".
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = app;
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map(|_| ())
+            .map_err(msg)
+    }
+    #[cfg(not(windows))]
+    {
+        app.opener().open_url(url, None::<&str>).map_err(msg)
+    }
+}
+
+/// Saves the audio of a YouTube video into the library.
+#[tauri::command(async)]
+fn youtube_import(app: AppHandle, state: State<'_, AppState>, url: String, channel_tag: Option<String>) -> CmdResult<Option<Asset>> {
+    let data = app.path().app_data_dir().map_err(msg)?;
+    let folder = data.join("YouTube");
+    let path = gmaudio_core::youtube::download(&data.join("tools"), &url, &folder).map_err(msg)?;
+    add_download(&state, &folder, &path.to_string_lossy(), channel_tag)
+}
+
+/// The app's version, and the commit it was built from when known.
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    let version = app.package_info().version.to_string();
+    match option_env!("GMAUDIO_COMMIT") {
+        Some(commit) if !commit.is_empty() => format!("{version} ({commit})"),
+        _ => version,
+    }
+}
+
+#[tauri::command]
+fn engine_swap_with_playing(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
+    state.engine.swap_with_playing(id).map_err(msg)
+}
+
+#[tauri::command]
+fn engine_pause(state: State<'_, AppState>, id: u64, paused: bool, fade_ms: u32) -> CmdResult<()> {
+    state.engine.pause_sound(id, paused, fade_ms).map_err(msg)
+}
+
+/// The Freesound sign-in address, for copying when the browser did not open it right.
+#[tauri::command]
+fn freesound_sign_in_url(state: State<'_, AppState>) -> CmdResult<String> {
+    Ok(freesound::authorize_url(&freesound_credentials(&state)?.client_id))
 }
 
 fn path_is_preview(sound: &freesound::Sound, path: &Path) -> bool {
@@ -630,7 +696,7 @@ fn freesound_open_page(app: AppHandle, url: String) -> CmdResult<()> {
     if !url.starts_with("https://freesound.org/") {
         return Err("Only Freesound pages can be opened from here.".into());
     }
-    app.opener().open_url(url, None::<&str>).map_err(msg)
+    open_in_browser(&app, &url)
 }
 
 // ---- bundles -----------------------------------------------------------------
@@ -735,6 +801,12 @@ pub fn run() {
             engine_command_log,
             library_set_trim,
             engine_move_queued,
+            engine_swap_with_playing,
+            engine_pause,
+            youtube_import,
+            app_version,
+            freesound_sign_in_url,
+            freesound_remove_key,
             engine_seek,
             library_credits,
             engine_set_profile,

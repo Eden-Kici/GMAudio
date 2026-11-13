@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// File extensions the library imports.
 ///
 /// Opus is not in this list: the decoder (symphonia 0.6) has no Opus codec.
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp3", "ogg", "oga", "flac", "wav"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp3", "ogg", "oga", "flac", "wav", "m4a"];
 
 /// Every asset is levelled towards this integrated loudness.
 pub const TARGET_LUFS: f64 = -18.0;

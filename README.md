@@ -3,12 +3,14 @@
 An audio control center for running tabletop RPG sessions: music, ambience and
 sound effects from your own files, on one screen. Windows 10/11.
 
+Version 0.6.0 (shown at the bottom of Settings, and in `VERSION`).
+
 Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 
 ## What it does
 
 **Library**
-- Add folders of MP3, OGG (Vorbis), FLAC and WAV files. Files stay where they
+- Add folders of MP3, OGG (Vorbis), FLAC, WAV and M4A files. Files stay where they
   are; new files in those folders are picked up automatically.
 - Built-in starter sounds (synthesised) for trying things out.
 - Every file is measured once (length, loudness, tempo) so all sounds play at
@@ -21,10 +23,14 @@ Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 - Tag many sounds at once: Ctrl+click, Shift+click or "Select all".
 - Find sounds online: search Freesound, listen, download into the library.
   Credits are kept with each sound.
+- Add from YouTube: paste a link, the audio is saved as M4A (uses yt-dlp,
+  fetched on first use).
 
 **Mixer**
 - Four channels with volume, mute, solo, fade time and level meters.
-- Music queue: next, repeat one track, repeat the queue.
+- Music queue: next, repeat one track, repeat the queue, drag to reorder,
+  drag onto the playing track to swap.
+- Seek bar and pause (at once or with a fade) on longer sounds.
 - Stingers and chosen pads lower the music while they sound.
 - Audio profiles for headphones, laptop speakers, a table speaker, or custom.
 - **Esc** fades everything out. Press again to cut instantly.

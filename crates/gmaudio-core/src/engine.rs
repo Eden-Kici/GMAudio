@@ -325,6 +325,8 @@ pub struct SoundState {
     pub looping: bool,
     /// Fading out; it will be gone when the fade ends.
     pub stopping: bool,
+    /// Held where it is until resumed.
+    pub paused: bool,
     pub trim_db: f32,
     pub tag: Option<String>,
 }
@@ -382,6 +384,18 @@ impl Handle {
         match self {
             Handle::Static(h) => h.position(),
             Handle::Streaming(h) => h.position(),
+        }
+    }
+    fn pause(&mut self, tween: Tween) {
+        match self {
+            Handle::Static(h) => h.pause(tween),
+            Handle::Streaming(h) => h.pause(tween),
+        }
+    }
+    fn resume(&mut self, tween: Tween) {
+        match self {
+            Handle::Static(h) => h.resume(tween),
+            Handle::Streaming(h) => h.resume(tween),
         }
     }
     fn seek_to(&mut self, seconds: f64) {
@@ -854,6 +868,40 @@ impl<B: Backend> Mixer<B> {
         }
     }
 
+    /// Plays a queued track now and puts the playing one in its place in
+    /// the queue.
+    pub fn swap_with_playing(&mut self, id: u64) {
+        let Some(at) = self.queue.iter().position(|q| q.id == id) else { return };
+        let Some(item) = self.queue.remove(at) else { return };
+        let fade = ms(self.settings.channels[Channel::Music.index()].fade_ms);
+        let mut back = Vec::new();
+        for s in self.sounds.iter_mut().filter(|s| s.channel == Channel::Music && !s.stopping) {
+            s.handle.stop(fade_out(fade));
+            s.stopping = true;
+            back.push((s.request.clone(), s.looping));
+        }
+        for (request, looping) in back {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.queue.insert(at.min(self.queue.len()), Queued { id, looping, request });
+        }
+        self.queue.push_front(item);
+        self.advance_music();
+    }
+
+    /// Holds a playing sound where it is (`fade_ms` 0: at once), or lets
+    /// it carry on.
+    pub fn pause_sound(&mut self, id: u64, paused: bool, fade_ms: u32) {
+        if let Some(s) = self.sounds.iter_mut().find(|s| s.id == id && !s.stopping) {
+            let tween = fade_out(ms(fade_ms));
+            if paused {
+                s.handle.pause(tween);
+            } else {
+                s.handle.resume(tween);
+            }
+        }
+    }
+
     /// Jumps a playing sound to another point in the file.
     pub fn seek_sound(&mut self, id: u64, position_ms: i64) {
         if let Some(s) = self.sounds.iter_mut().find(|s| s.id == id && !s.stopping) {
@@ -1222,6 +1270,7 @@ impl<B: Backend> Mixer<B> {
                     duration_ms: s.duration_ms,
                     looping: s.looping,
                     stopping: s.stopping,
+                    paused: matches!(s.handle.state(), PlaybackState::Pausing | PlaybackState::Paused),
                     trim_db: s.request.trim_db,
                     tag: s.request.tag.clone(),
                 })
@@ -1334,6 +1383,8 @@ pub enum Command {
     /// Crossfade to this queued music track now.
     PlayQueuedNow { id: u64 },
     MoveQueued { id: u64, to: usize },
+    SwapWithPlaying { id: u64 },
+    PauseSound { id: u64, paused: bool, fade_ms: u32 },
     SeekSound { id: u64, position_ms: i64 },
     SetSoundTrim { id: u64, trim_db: f32 },
     SetChannelSolo { channel: Channel, solo: bool },
@@ -1569,6 +1620,14 @@ impl Engine {
         self.send(Command::MoveQueued { id, to }).map(|_| ())
     }
 
+    pub fn swap_with_playing(&self, id: u64) -> Result<()> {
+        self.send(Command::SwapWithPlaying { id }).map(|_| ())
+    }
+
+    pub fn pause_sound(&self, id: u64, paused: bool, fade_ms: u32) -> Result<()> {
+        self.send(Command::PauseSound { id, paused, fade_ms }).map(|_| ())
+    }
+
     pub fn seek_sound(&self, id: u64, position_ms: i64) -> Result<()> {
         self.send(Command::SeekSound { id, position_ms }).map(|_| ())
     }
@@ -1712,6 +1771,14 @@ fn run<B: Backend>(mixer: &mut Mixer<B>, command: Command) -> Result<Reply> {
             mixer.move_queued(id, to);
             Ok(Reply::Done)
         }
+        Command::SwapWithPlaying { id } => {
+            mixer.swap_with_playing(id);
+            Ok(Reply::Done)
+        }
+        Command::PauseSound { id, paused, fade_ms } => {
+            mixer.pause_sound(id, paused, fade_ms);
+            Ok(Reply::Done)
+        }
         Command::SeekSound { id, position_ms } => {
             mixer.seek_sound(id, position_ms);
             Ok(Reply::Done)
@@ -1827,6 +1894,8 @@ fn run_offline(
         | Command::NextTrack
         | Command::PlayQueuedNow { .. }
         | Command::MoveQueued { .. }
+        | Command::SwapWithPlaying { .. }
+        | Command::PauseSound { .. }
         | Command::SeekSound { .. }
         | Command::RetryDevice
         | Command::Reopen => Ok(Reply::Done),
@@ -2081,6 +2150,41 @@ mod tests {
         m.seek_sound(first, 999_999);
         render_until(&mut m, |m| m.state().sounds[0].position_ms >= 29_000);
         assert_eq!(m.state().sounds[0].id, first, "a seek past the end stops just short of it");
+    }
+
+    #[test]
+    fn a_queued_track_swaps_with_the_playing_one_and_sounds_pause() {
+        let f = files();
+        let mut m = mixer();
+        let first = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        let second = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        let third = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        play_for(&mut m, 100);
+
+        m.swap_with_playing(third);
+        let s = m.state();
+        let live: Vec<u64> = s.sounds.iter().filter(|s| !s.stopping).map(|s| s.id).collect();
+        assert_eq!(live, [third], "the dragged track plays");
+        assert!(s.sounds.iter().any(|s| s.id == first && s.stopping), "the old one fades out");
+        let queue = &music(&m).queue;
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].id, second);
+        assert_ne!(queue[1].id, third, "the old track took the dragged one's place");
+
+        // Pause holds the position; resume carries on from it.
+        play_for(&mut m, 300);
+        m.pause_sound(third, true, 0);
+        play_for(&mut m, 100);
+        let held = m.state().sounds.iter().find(|s| s.id == third).unwrap().clone();
+        assert!(held.paused);
+        play_for(&mut m, 500);
+        let later = m.state().sounds.iter().find(|s| s.id == third).unwrap().clone();
+        assert_eq!(later.position_ms, held.position_ms);
+        assert_eq!(music(&m).queue.len(), 2, "a paused track does not let the queue move on");
+        m.pause_sound(third, false, 0);
+        play_for(&mut m, 300);
+        let resumed = m.state().sounds.iter().find(|s| s.id == third).unwrap().clone();
+        assert!(!resumed.paused && resumed.position_ms > held.position_ms);
     }
 
     #[test]

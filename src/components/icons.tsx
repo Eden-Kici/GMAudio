@@ -44,6 +44,13 @@ export const StopIcon = (p: SVGProps<SVGSVGElement>) => (
   </svg>
 );
 
+export const PauseIcon = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)} fill="currentColor" stroke="none">
+    <rect x="3.5" y="3" width="3.2" height="10" rx="1" />
+    <rect x="9.3" y="3" width="3.2" height="10" rx="1" />
+  </svg>
+);
+
 export const RefreshIcon = (p: SVGProps<SVGSVGElement>) => (
   <svg {...base(p)}>
     <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />

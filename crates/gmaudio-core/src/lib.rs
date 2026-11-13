@@ -15,5 +15,6 @@ pub mod project;
 pub mod search;
 pub mod secrets;
 pub mod tempo;
+pub mod youtube;
 
 pub use error::{Error, Result};

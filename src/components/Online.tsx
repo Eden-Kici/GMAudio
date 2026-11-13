@@ -83,16 +83,25 @@ function KeyForm({ status, onSaved, onCancel }: { status: FreesoundStatus; onSav
         </Field>
       </div>
       <p className="text-xs text-faint">
-        The key is kept in Windows' own password store, not in the library file.
-        {status.hasKey ? " Saving replaces the key in use now; leave both boxes empty and save to remove it." : ""}
+        {status.hasKey
+          ? "A key is saved on this computer and is not shown again. Fill in a box only to replace that value; an empty box keeps what is saved."
+          : "The key is saved on this computer, so you only do this once."}
       </p>
-      <div className="flex justify-end gap-2">
+      <div className="flex items-center justify-end gap-2">
+        {status.hasKey && (
+          <button
+            onClick={() => void api.freesoundRemoveKey().then(onSaved).catch(notify)}
+            className="mr-auto text-xs font-medium text-dim underline-offset-2 hover:text-danger hover:underline"
+          >
+            Remove the saved key
+          </button>
+        )}
         {onCancel && (
           <button onClick={onCancel} className={buttonClass}>
             Cancel
           </button>
         )}
-        <button onClick={save} disabled={!status.hasKey && !apiKey.trim()} className={primaryClass}>
+        <button onClick={save} disabled={status.hasKey ? !apiKey.trim() && !clientId.trim() : !apiKey.trim()} className={primaryClass}>
           Save
         </button>
       </div>
@@ -296,11 +305,24 @@ function SignIn({ status, setStatus, onEditKey }: { status: FreesoundStatus; set
   return (
     <div className="space-y-2 border-t border-line px-4 py-3 text-xs text-faint">
       {asking ? (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="shrink-0 text-dim">Your browser opened Freesound. Allow access, then paste the code it shows:</span>
           <input autoFocus value={code} onChange={(e) => setCode(e.target.value)} spellCheck={false} className={`${inputBase} h-8 min-w-0 flex-1`} aria-label="Code from Freesound" />
           <button onClick={() => void finish()} disabled={busy || !code.trim()} className={primaryClass}>
             {busy ? "Checking…" : "Finish"}
+          </button>
+          <button
+            onClick={() =>
+              void api
+                .freesoundSignInUrl()
+                .then((url) => navigator.clipboard.writeText(url))
+                .then(() => useStore.getState().notify("Sign-in link copied. Paste it into your browser's address bar.", "info"))
+                .catch(notify)
+            }
+            title="If the browser did not open, or showed “Access has been denied”, paste this link into its address bar instead"
+            className={link}
+          >
+            Copy link
           </button>
           <button onClick={() => setAsking(false)} className={link}>
             Cancel

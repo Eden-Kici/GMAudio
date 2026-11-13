@@ -196,6 +196,8 @@ export interface SoundState {
   duration_ms: number | null;
   looping: boolean;
   stopping: boolean;
+  /** Held where it is until resumed. */
+  paused: boolean;
   trim_db: number;
   tag: string | null;
 }
@@ -306,6 +308,12 @@ export const api = {
   setLoopQueue: (on: boolean) => invoke<void>("engine_set_loop_queue", { on }),
   nextTrack: () => invoke<void>("engine_next_track"),
   playQueuedNow: (id: number) => invoke<void>("engine_play_queued_now", { id }),
+  swapWithPlaying: (id: number) => invoke<void>("engine_swap_with_playing", { id }),
+  pauseSound: (id: number, paused: boolean, fadeMs: number) => invoke<void>("engine_pause", { id, paused, fadeMs }),
+  youtubeImport: (url: string, channelTag: string | null) => invoke<Asset | null>("youtube_import", { url, channelTag }),
+  appVersion: () => invoke<string>("app_version"),
+  freesoundSignInUrl: () => invoke<string>("freesound_sign_in_url"),
+  freesoundRemoveKey: () => invoke<FreesoundStatus>("freesound_remove_key"),
   moveQueued: (id: number, to: number) => invoke<void>("engine_move_queued", { id, to }),
   seek: (id: number, positionMs: number) => invoke<void>("engine_seek", { id, positionMs }),
   setTrim: (assetId: number, trimDb: number) => invoke<Asset>("library_set_trim", { assetId, trimDb }),

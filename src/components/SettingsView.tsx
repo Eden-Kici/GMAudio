@@ -2,7 +2,7 @@ import { api } from "../api";
 import { describeAction } from "../actions";
 import { useDocs } from "../docs";
 import { useStore } from "../store";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BackupSection } from "./Backup";
 import { CloseIcon } from "./icons";
 import { OnlineSounds } from "./Online";
@@ -18,6 +18,10 @@ export function SettingsView() {
   const duckDb = useStore((s) => s.engine?.duck_db ?? -8);
   const setSetupDone = useDocs((s) => s.setSetupDone);
   const [online, setOnline] = useState(false);
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    void api.appVersion().then(setVersion).catch(() => {});
+  }, []);
   const copyCredits = async () => {
     const credits = await api.credits();
     if (credits.length === 0) return useStore.getState().notify("No downloaded sounds need a credit yet.", "info");
@@ -113,7 +117,7 @@ export function SettingsView() {
             <BackupSection />
           </Field>
         </section>
-        {online && <OnlineSounds startWithKey onClose={() => setOnline(false)} />}
+        {online && <OnlineSounds onClose={() => setOnline(false)} />}
 
         <section className="flex items-center justify-between rounded-xl bg-panel p-4">
           <span className="text-sm text-dim">Walk through first-time setup again, including the example scenes.</span>
@@ -121,6 +125,7 @@ export function SettingsView() {
             Run setup
           </button>
         </section>
+        <p className="pb-2 text-center text-xs text-faint">GMAudio version {version || "…"}</p>
       </div>
     </main>
   );
