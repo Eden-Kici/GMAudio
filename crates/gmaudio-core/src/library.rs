@@ -302,6 +302,30 @@ impl Library {
         Ok(asset)
     }
 
+    /// Sets whether a sound repeats whenever it is played.
+    pub fn set_always_loop(&self, asset_id: i64, on: bool) -> Result<Asset> {
+        let asset = {
+            let db = self.inner.db.lock().unwrap();
+            db.set_always_loop(asset_id, on)?;
+            db.asset(asset_id)?
+        };
+        self.inner.index.write().unwrap().upsert(asset.clone());
+        Ok(asset)
+    }
+
+    /// Sets which parts of a sound play. The file is not touched.
+    pub fn set_edit(&self, asset_id: i64, edit: Option<crate::model::AssetEdit>) -> Result<Asset> {
+        let asset = {
+            let db = self.inner.db.lock().unwrap();
+            let duration = db.asset(asset_id)?.duration_ms;
+            let edit = edit.and_then(|e| e.normalized(duration));
+            db.set_edit(asset_id, edit.as_ref())?;
+            db.asset(asset_id)?
+        };
+        self.inner.index.write().unwrap().upsert(asset.clone());
+        Ok(asset)
+    }
+
     /// Every sound in the library, straight from the database.
     pub fn all_assets(&self) -> Result<Vec<Asset>> {
         self.inner.db.lock().unwrap().all_assets()

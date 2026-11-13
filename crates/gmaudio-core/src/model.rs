@@ -83,6 +83,12 @@ pub struct Asset {
     /// The user's own correction in dB, added to `gain_db` at playback.
     #[serde(default)]
     pub trim_db: f64,
+    /// Repeat whenever it is played, on any channel.
+    #[serde(default)]
+    pub always_loop: bool,
+    /// Which parts of the file play. The file itself is never changed.
+    #[serde(default)]
+    pub edit: Option<AssetEdit>,
     pub tags: Vec<Tag>,
 }
 
@@ -105,6 +111,54 @@ pub struct Analysis {
 /// The four tags that say which mixer channel a sound belongs on, in
 /// channel order. A sound with exactly one of them plays there with a
 /// single click.
+/// A trim of a sound: where it starts and ends, and stretches to skip.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AssetEdit {
+    #[serde(default)]
+    pub start_ms: i64,
+    #[serde(default)]
+    pub end_ms: Option<i64>,
+    /// Skipped stretches as (from, to).
+    #[serde(default)]
+    pub cuts: Vec<(i64, i64)>,
+}
+
+impl AssetEdit {
+    /// Tidies an edit for a file of the given length: times inside the
+    /// file, cuts in order without overlaps and inside the kept part.
+    /// `None` when nothing is left to change.
+    pub fn normalized(mut self, duration_ms: Option<i64>) -> Option<AssetEdit> {
+        let length = duration_ms.unwrap_or(i64::MAX);
+        self.start_ms = self.start_ms.clamp(0, length);
+        self.end_ms = self.end_ms.map(|end| end.min(length)).filter(|end| *end < length && *end > self.start_ms + 100);
+        let (first, last) = (self.start_ms, self.end_ms.unwrap_or(length));
+        let mut cuts: Vec<(i64, i64)> = self
+            .cuts
+            .iter()
+            .map(|(a, b)| ((*a).min(*b).max(first), (*a).max(*b).min(last)))
+            .filter(|(a, b)| b - a >= 50)
+            .collect();
+        cuts.sort_unstable();
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (from, to) in cuts {
+            match merged.last_mut() {
+                Some(previous) if from <= previous.1 => previous.1 = previous.1.max(to),
+                _ => merged.push((from, to)),
+            }
+        }
+        // A cut touching either edge is just a later start or an earlier end.
+        if merged.first().is_some_and(|c| c.0 <= first) {
+            self.start_ms = merged.remove(0).1;
+        }
+        if merged.last().is_some_and(|c| c.1 >= last) {
+            self.end_ms = Some(merged.pop().unwrap().0);
+        }
+        self.cuts = merged;
+        let unchanged = self.start_ms == 0 && self.end_ms.is_none() && self.cuts.is_empty();
+        (!unchanged).then_some(self)
+    }
+}
+
 pub const CHANNEL_TAGS: [&str; 4] = ["Music", "Ambience", "Sound effects", "Stinger"];
 pub const CHANNEL_TAG_CATEGORY: &str = "channel";
 
@@ -150,6 +204,17 @@ pub fn guess_channel_tag(path: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_is_tidied_to_fit_the_file() {
+        let edit = AssetEdit { start_ms: 2_000, end_ms: Some(50_000), cuts: vec![(9_000, 8_000), (8_500, 12_000), (1_000, 3_000), (20_000, 20_010)] };
+        let tidy = edit.normalized(Some(30_000)).unwrap();
+        assert_eq!(tidy, AssetEdit { start_ms: 3_000, end_ms: None, cuts: vec![(8_000, 12_000)] });
+        assert_eq!(AssetEdit::default().normalized(Some(30_000)), None);
+        assert_eq!(AssetEdit { start_ms: 0, end_ms: Some(30_000), cuts: vec![] }.normalized(Some(30_000)), None);
+        let tail = AssetEdit { start_ms: 0, end_ms: None, cuts: vec![(25_000, 40_000)] }.normalized(Some(30_000)).unwrap();
+        assert_eq!(tail, AssetEdit { start_ms: 0, end_ms: Some(25_000), cuts: vec![] });
+    }
 
     #[test]
     fn guesses_channel_from_folder_names() {

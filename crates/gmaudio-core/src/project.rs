@@ -36,6 +36,7 @@ pub fn play_request(library: &Library, asset_id: i64, channel: Channel) -> Resul
             asset.error.as_deref().unwrap_or("unknown problem")
         )));
     }
+    let edit = asset.edit.unwrap_or_default();
     Ok(PlayRequest {
         asset_id,
         path: asset.path.into(),
@@ -43,6 +44,10 @@ pub fn play_request(library: &Library, asset_id: i64, channel: Channel) -> Resul
         channel,
         gain_db: (asset.gain_db + asset.trim_db) as f32,
         duration_ms: asset.duration_ms,
+        always_loop: asset.always_loop,
+        start_ms: edit.start_ms,
+        end_ms: edit.end_ms,
+        cuts: edit.cuts,
         ..Default::default()
     })
 }
@@ -154,6 +159,8 @@ pub fn scene_request(library: &Library, id: i64, doc: &SceneDoc) -> Resolved<Sce
                 .filter_map(|asset_id| {
                     let mut request = resolve(*asset_id, Channel::Ambience)?;
                     request.trim_db = emitter.volume_db;
+                    // An occasional sound that never ended would only pile up.
+                    request.always_loop = false;
                     Some(request)
                 })
                 .collect();

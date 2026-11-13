@@ -265,6 +265,8 @@ mod tests {
             license: None,
             attribution: None,
             trim_db: 0.0,
+            always_loop: false,
+            edit: None,
             tags: tags
                 .iter()
                 .map(|t| Tag {

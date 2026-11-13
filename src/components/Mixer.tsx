@@ -21,7 +21,7 @@ export function Mixer() {
   const emitters = useStore((s) => s.engine?.emitters);
 
   return (
-    <section aria-label="Mixer" className="grid h-60 shrink-0 grid-cols-4 gap-px border-t border-line bg-line">
+    <section aria-label="Mixer" className="grid h-60 shrink-0 grid-cols-4 grid-rows-[minmax(0,1fr)] gap-px border-t border-line bg-line">
       {CHANNELS.map((c) => (
         <Strip
           key={c.id}
@@ -82,12 +82,15 @@ function Strip({ id, label, hint, color, state, sounds, emitters, index }: Strip
 
   return (
     <div
-      className={`relative flex min-w-0 flex-col bg-panel px-4 pb-3 pt-3 ${dragging ? "transition-shadow" : ""}`}
+      className={`relative flex min-h-0 min-w-0 flex-col bg-panel px-4 pb-3 pt-3 ${dragging ? "transition-shadow" : ""}`}
       style={over ? { boxShadow: `inset 0 0 0 2px ${color}` } : undefined}
       onDragOver={(e) => {
-        if (!e.dataTransfer.types.includes(DRAG_TYPE)) return;
+        const types = e.dataTransfer.types;
+        // A sound from the library, or one playing or queued on another channel.
+        const fromElsewhere = types.some((t) => t.startsWith(SOUND_DRAG) && t !== SOUND_DRAG + id) || (types.includes(QUEUE_DRAG) && !isMusic);
+        if (!types.includes(DRAG_TYPE) && !fromElsewhere) return;
         e.preventDefault();
-        e.dataTransfer.dropEffect = "copy";
+        e.dataTransfer.dropEffect = fromElsewhere ? "move" : "copy";
         setOver(true);
       }}
       onDragLeave={(e) => {
@@ -95,6 +98,12 @@ function Strip({ id, label, hint, color, state, sounds, emitters, index }: Strip
       }}
       onDrop={(e) => {
         setOver(false);
+        const moved = e.dataTransfer.types.find((t) => t.startsWith(SOUND_DRAG) || t === QUEUE_DRAG);
+        if (moved && moved !== SOUND_DRAG + id) {
+          e.preventDefault();
+          void api.moveToChannel(Number(e.dataTransfer.getData(moved)), id).catch((err) => useStore.getState().notify(String(err)));
+          return;
+        }
         const assetId = Number(e.dataTransfer.getData(DRAG_TYPE));
         if (!assetId) return;
         e.preventDefault();
@@ -235,6 +244,8 @@ function LoopToggle({ id, on, name }: { id: number; on: boolean; name: string })
 }
 
 const QUEUE_DRAG = "application/x-gmaudio-queue";
+/** A playing sound being dragged; the channel it is on is appended. */
+const SOUND_DRAG = "application/x-gmaudio-sound-";
 
 /** Pause or resume, at once or with a fade. Opens a two-line menu. */
 function PauseMenu({ sound, fade }: { sound: SoundState; fade: number }) {
@@ -371,7 +382,17 @@ function Playing({ sound, color, fade }: { sound: SoundState; color: string; fad
         </div>
       )}
       <div className="relative flex h-8 items-center gap-1.5 pl-2.5 pr-1">
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">{sound.name}</span>
+        <span
+          draggable={!sound.stopping}
+          onDragStart={(e) => {
+            e.dataTransfer.setData(SOUND_DRAG + sound.channel, String(sound.id));
+            e.dataTransfer.effectAllowed = "move";
+          }}
+          className="min-w-0 flex-1 cursor-grab truncate text-xs font-medium active:cursor-grabbing"
+          title={`${sound.name}. Drag to another channel${sound.channel === "music" ? ", or into the queue" : ""}.`}
+        >
+          {sound.name}
+        </span>
         {sound.channel === "ambience" && sound.looping && !sound.stopping && (
           <input
             type="range"
@@ -437,22 +458,32 @@ function Queued({ item, index }: { item: QueuedState; index: number }) {
         e.dataTransfer.effectAllowed = "move";
       }}
       onDragOver={(e) => {
-        if (!e.dataTransfer.types.includes(QUEUE_DRAG)) return;
+        const types = e.dataTransfer.types;
+        if (!types.includes(QUEUE_DRAG) && !types.includes(DRAG_TYPE) && !types.includes(SOUND_DRAG + "music")) return;
         e.preventDefault();
         e.stopPropagation();
-        e.dataTransfer.dropEffect = "move";
+        e.dataTransfer.dropEffect = types.includes(DRAG_TYPE) ? "copy" : "move";
         setOver(true);
       }}
       onDragLeave={() => setOver(false)}
       onDrop={(e) => {
-        const id = Number(e.dataTransfer.getData(QUEUE_DRAG));
         setOver(false);
-        if (!id) return;
+        const queued = Number(e.dataTransfer.getData(QUEUE_DRAG));
+        const playing = Number(e.dataTransfer.getData(SOUND_DRAG + "music"));
+        const assetId = Number(e.dataTransfer.getData(DRAG_TYPE));
+        if (!queued && !playing && !assetId) return;
         e.preventDefault();
         e.stopPropagation();
-        if (id !== item.id) void api.moveQueued(id, index);
+        if (queued) {
+          if (queued !== item.id) void api.moveQueued(queued, index);
+        } else if (playing) {
+          void api.requeuePlaying(playing, index);
+        } else {
+          // From the library: add it, then put it in this place.
+          void api.play(assetId, "music").then((id) => api.moveQueued(id, index));
+        }
       }}
-      title="Drag to change the order"
+      title="Drag to change the order, onto the playing track to swap, or to another channel"
       className={`flex h-7 cursor-grab items-center gap-1.5 rounded-md border pl-2.5 pr-1 active:cursor-grabbing ${over ? "border-accent bg-accent/10" : "border-line"}`}
     >
       <span className="min-w-0 flex-1 truncate text-xs text-dim">{item.name}</span>

@@ -219,7 +219,28 @@ pub fn search(api_key: &str, query: &str, page: u32) -> Result<SearchPage> {
 
 /// The page to open in a browser to sign in. It ends by showing a code.
 pub fn authorize_url(client_id: &str) -> String {
-    format!("{API}/oauth2/authorize/?client_id={client_id}&response_type=code")
+    let challenge = challenge_for(&verifier());
+    format!("{API}/oauth2/authorize/?client_id={client_id}&response_type=code&code_challenge={challenge}&code_challenge_method=S256")
+}
+
+/// The secret half of the sign-in proof (PKCE), made once per run of the
+/// app: Freesound gets its hash with the sign-in page and the secret
+/// itself with the code, which shows both came from the same app.
+fn verifier() -> String {
+    static VERIFIER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERIFIER
+        .get_or_init(|| {
+            const SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+            (0..64).map(|_| SAFE[fastrand::usize(..SAFE.len())] as char).collect()
+        })
+        .clone()
+}
+
+/// The hash Freesound is shown: SHA-256, in URL-safe base64 without padding.
+fn challenge_for(verifier: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()))
 }
 
 fn token_request(credentials: &Credentials, grant: &[(&str, &str)]) -> Result<Tokens> {
@@ -241,7 +262,11 @@ fn token_request(credentials: &Credentials, grant: &[(&str, &str)]) -> Result<To
 
 /// Trades the code shown after signing in for tokens.
 pub fn exchange_code(credentials: &Credentials, code: &str) -> Result<Tokens> {
-    token_request(credentials, &[("grant_type", "authorization_code"), ("code", code.trim())])
+    let verifier = verifier();
+    token_request(
+        credentials,
+        &[("grant_type", "authorization_code"), ("code", code.trim()), ("code_verifier", verifier.as_str())],
+    )
 }
 
 /// Gets a new access token when the old one has run out (they last a day).
@@ -366,10 +391,12 @@ mod tests {
 
     #[test]
     fn builds_the_sign_in_address() {
-        assert_eq!(
-            authorize_url("abc123"),
-            "https://freesound.org/apiv2/oauth2/authorize/?client_id=abc123&response_type=code"
-        );
+        let url = authorize_url("abc123");
+        assert!(url.starts_with("https://freesound.org/apiv2/oauth2/authorize/?client_id=abc123&response_type=code&code_challenge="));
+        assert!(url.ends_with("&code_challenge_method=S256"));
+        assert_eq!(url, authorize_url("abc123"), "one proof per run, so a copied link matches the opened one");
+        // The example from the PKCE standard (RFC 7636, appendix B).
+        assert_eq!(challenge_for("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
         assert_eq!(license_name("https://creativecommons.org/licenses/by-nc/3.0/"), "CC BY-NC");
         assert_eq!(license_name("https://creativecommons.org/licenses/sampling+/1.0/"), "Sampling+");
     }

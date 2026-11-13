@@ -5,6 +5,7 @@ import { folderName, formatTime, plural, relativeFolder } from "../format";
 import { MAX_PANES, playingKey, RESULT_LIMIT, useStore, type Pane } from "../store";
 import { CheckIcon, ChevronIcon, CloseIcon, FolderIcon, PlayIcon, PlusIcon, SearchIcon, SplitIcon, WarningIcon } from "./icons";
 import { pickFolder } from "./Sidebar";
+import { editedLength, TrimEditor } from "./TrimEditor";
 import { formatDb, inputBase, Slider } from "./ui";
 
 /** What a dragged sound carries, so the mixer knows it when it lands. */
@@ -298,7 +299,13 @@ const Row = memo(function Row({ asset, folder, playing, selected, paneId, picked
               </span>
             )}
           </span>
-          <span className="w-10 shrink-0 text-right text-xs tabular-nums text-dim">{formatTime(asset.duration_ms)}</span>
+          <span
+            className="w-12 shrink-0 text-right text-xs tabular-nums text-dim"
+            title={[asset.always_loop ? "Always loops" : "", asset.edit ? `Trimmed from ${formatTime(asset.duration_ms)}` : ""].filter(Boolean).join(". ") || undefined}
+          >
+            {asset.always_loop ? "↻ " : ""}
+            {asset.duration_ms != null && asset.edit ? formatTime(editedLength(asset.duration_ms, asset.edit)) : formatTime(asset.duration_ms)}
+          </span>
         </button>
 
         <div className="flex shrink-0 gap-1" role="group" aria-label={`Play ${asset.name}`}>
@@ -437,6 +444,8 @@ function BulkBar() {
 function Details({ asset }: { asset: Asset }) {
   const advanced = useDocs((s) => s.advanced);
   const refresh = useStore((s) => s.refresh);
+  const [trimming, setTrimming] = useState(false);
+  const pill = "h-6 rounded-full border px-2.5 font-medium transition-colors";
   const setTags = useStore((s) => s.setTags);
   const toggleChannelTag = useStore((s) => s.toggleChannelTag);
   const [draft, setDraft] = useState("");
@@ -516,6 +525,32 @@ function Details({ asset }: { asset: Asset }) {
           className="h-6 w-44 select-text rounded border border-line bg-bg px-2 placeholder:text-faint focus:border-accent focus:outline-none"
         />
       </div>
+
+      {asset.status !== "failed" && (
+        <div className="flex items-center gap-1.5">
+          <span className="mr-1 w-14 text-dim">Playback</span>
+          <button
+            onClick={() => void api.setAlwaysLoop(asset.id, !asset.always_loop).then(refresh)}
+            aria-pressed={asset.always_loop}
+            title={
+              asset.always_loop
+                ? "This sound repeats until you stop it, wherever it is played. Click to turn off."
+                : "Make this sound repeat until you stop it, wherever it is played"
+            }
+            className={`${pill} ${asset.always_loop ? "border-accent bg-accent text-bg" : "border-line text-dim hover:border-accent hover:text-accent"}`}
+          >
+            Always loop
+          </button>
+          <button
+            onClick={() => setTrimming(true)}
+            title="Choose where this sound starts and ends, and parts to skip"
+            className={`${pill} ${asset.edit ? "border-accent text-accent" : "border-line text-dim hover:border-accent hover:text-accent"}`}
+          >
+            {asset.edit ? `Trimmed to ${formatTime(editedLength(asset.duration_ms ?? 0, asset.edit))}` : "Trim…"}
+          </button>
+          {trimming && <TrimEditor asset={asset} onClose={() => setTrimming(false)} />}
+        </div>
+      )}
 
       {(advanced || asset.trim_db !== 0) && asset.status !== "failed" && (
         <div className="flex items-center gap-1.5">

@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "gmaudio"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "gmaudio-core",
  "include_dir",
@@ -1577,6 +1577,7 @@ dependencies = [
 name = "gmaudio-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "ebur128",
  "fastrand",
  "keyring",
@@ -1585,6 +1586,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "symphonia",
  "tempfile",
  "thiserror 2.0.21",

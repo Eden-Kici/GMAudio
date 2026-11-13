@@ -237,6 +237,27 @@ pub struct PlayRequest {
     /// Hold the sound back this long before it starts (a stinger waiting
     /// for the beat).
     pub delay_ms: u32,
+    /// The sound is set to always repeat, whatever started it.
+    pub always_loop: bool,
+    /// Where the sound begins, when its opening has been trimmed off.
+    pub start_ms: i64,
+    /// Where the sound ends, when its tail has been trimmed off.
+    pub end_ms: Option<i64>,
+    /// Stretches in between that are skipped, as (from, to), in order.
+    pub cuts: Vec<(i64, i64)>,
+    /// Begin here instead of at the start: a sound moved while playing.
+    pub resume_ms: Option<i64>,
+}
+
+impl PlayRequest {
+    /// The part of the file that plays, in seconds, for looping.
+    fn region(&self) -> Region {
+        let start = self.start_ms.max(0) as f64 / 1000.0;
+        match self.end_ms {
+            Some(end) if end > self.start_ms => Region::from(start..end as f64 / 1000.0),
+            _ => Region::from(start..),
+        }
+    }
 }
 
 /// A layer that plays a sound from its pool every so often: distant
@@ -423,8 +444,8 @@ impl Handle {
         }
     }
     /// Repeats the whole sound, or lets it run to its end.
-    fn set_repeat(&mut self, on: bool) {
-        let region = on.then(|| Region::from(..));
+    fn set_repeat(&mut self, on: bool, part: Region) {
+        let region = on.then_some(part);
         match self {
             Handle::Static(h) => h.set_loop_region(region),
             Handle::Streaming(h) => h.set_loop_region(region),
@@ -446,6 +467,9 @@ struct ActiveSound {
     stopping: bool,
     /// The stream broke; never put this sound back in the queue.
     failed: bool,
+    /// Reached its trimmed end: being faded out, but it counts as having
+    /// played through.
+    finished: bool,
     duck: bool,
     handle: Handle,
     /// Kept so a finished music track can rejoin a repeating queue.
@@ -655,7 +679,7 @@ impl<B: Backend> Mixer<B> {
         if req.channel == Channel::Music && !req.interrupt && self.music_is_playing() {
             self.queue.push_back(Queued {
                 id,
-                looping: req.looping.unwrap_or(false),
+                looping: req.always_loop || req.looping.unwrap_or(false),
                 request: req,
             });
             self.refresh_repeats();
@@ -682,7 +706,8 @@ impl<B: Backend> Mixer<B> {
     fn start(&mut self, id: u64, req: PlayRequest, fade: Option<Duration>) -> Result<()> {
         let channel = req.channel;
         let fade = fade.unwrap_or(ms(self.settings.channels[channel.index()].fade_ms));
-        let looping = req.looping.unwrap_or(channel.loops_by_default());
+        let looping = req.always_loop || req.looping.unwrap_or(channel.loops_by_default());
+        let begin = req.resume_ms.unwrap_or(req.start_ms).max(0) as f64 / 1000.0;
         let repeating = match channel {
             Channel::Music => looping || (self.loop_queue() && self.queue.is_empty()),
             _ => looping,
@@ -729,9 +754,10 @@ impl<B: Backend> Mixer<B> {
                 .playback_rate(rate)
                 .panning(pan)
                 .start_time(start_time)
+                .start_position(begin)
                 .fade_in_tween(fade_in_tween);
             if repeating {
-                data = data.loop_region(..);
+                data = data.loop_region(req.region());
             }
             Handle::Static(
                 track
@@ -745,9 +771,10 @@ impl<B: Backend> Mixer<B> {
                 .playback_rate(rate)
                 .panning(pan)
                 .start_time(start_time)
+                .start_position(begin)
                 .fade_in_tween(fade_in_tween);
             if repeating {
-                data = data.loop_region(..);
+                data = data.loop_region(req.region());
             }
             Handle::Streaming(
                 track
@@ -778,6 +805,7 @@ impl<B: Backend> Mixer<B> {
             repeating,
             stopping: false,
             failed: false,
+            finished: false,
             duck,
             handle,
             request: req,
@@ -799,7 +827,7 @@ impl<B: Backend> Mixer<B> {
                 _ => s.looping,
             };
             if want != s.repeating {
-                s.handle.set_repeat(want);
+                s.handle.set_repeat(want, s.request.region());
                 s.repeating = want;
             }
         }
@@ -886,6 +914,60 @@ impl<B: Backend> Mixer<B> {
             self.queue.insert(at.min(self.queue.len()), Queued { id, looping, request });
         }
         self.queue.push_front(item);
+        self.advance_music();
+    }
+
+    /// Moves a playing or queued sound to another channel. A playing one
+    /// carries on from where it was.
+    pub fn move_to_channel(&mut self, id: u64, channel: Channel) -> Result<()> {
+        let mut request = if let Some(at) = self.queue.iter().position(|q| q.id == id) {
+            let Some(item) = self.queue.remove(at) else { return Ok(()) };
+            let mut request = item.request;
+            request.looping = item.looping.then_some(true);
+            request
+        } else if let Some(s) = self.sounds.iter_mut().find(|s| s.id == id && !s.stopping) {
+            if s.channel == channel {
+                return Ok(());
+            }
+            let mut request = s.request.clone();
+            request.resume_ms = Some((s.handle.position() * 1000.0) as i64);
+            // Keep "repeat" only where the GM switched it on.
+            request.looping = (s.looping && s.channel == Channel::Music || request.looping == Some(true)).then_some(true);
+            s.handle.stop(fade_out(Duration::from_millis(150)));
+            s.stopping = true;
+            request
+        } else {
+            return Ok(());
+        };
+        request.channel = channel;
+        request.interrupt = true;
+        request.delay_ms = 0;
+        request.tag = None;
+        self.play(request).map(|_| ())
+    }
+
+    /// Puts the playing music track into the queue at `to` and moves on
+    /// to the next one.
+    pub fn requeue_playing(&mut self, id: u64, to: usize) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let fade = ms(self.settings.channels[Channel::Music.index()].fade_ms);
+        let Some(s) = self.sounds.iter_mut().find(|s| s.id == id && s.channel == Channel::Music && !s.stopping) else {
+            return;
+        };
+        s.handle.stop(fade_out(fade));
+        s.stopping = true;
+        let (request, looping) = (s.request.clone(), s.looping);
+        // The slot is counted in the queue as shown, before the next track leaves it.
+        let next = self.queue.pop_front();
+        let id = self.next_id;
+        self.next_id += 1;
+        let to = to.saturating_sub(1).min(self.queue.len());
+        self.queue.insert(to, Queued { id, looping, request });
+        if let Some(next) = next {
+            self.queue.push_front(next);
+        }
         self.advance_music();
     }
 
@@ -1205,6 +1287,20 @@ impl<B: Backend> Mixer<B> {
                 s.failed = true;
             }
         }
+        // Trimmed sounds: jump over the cut stretches, and end early.
+        for s in self.sounds.iter_mut().filter(|s| !s.stopping) {
+            if s.request.cuts.is_empty() && s.request.end_ms.is_none() {
+                continue;
+            }
+            let at = (s.handle.position() * 1000.0) as i64;
+            if let Some(&(_, to)) = s.request.cuts.iter().find(|(from, to)| at >= *from && at < *to) {
+                s.handle.seek_to(to as f64 / 1000.0);
+            } else if s.request.end_ms.is_some_and(|end| at >= end) && !s.repeating {
+                s.handle.stop(fade_out(Duration::from_millis(40)));
+                s.stopping = true;
+                s.finished = true;
+            }
+        }
         // A music track that played to its end rejoins a repeating queue.
         let loop_queue = self.loop_queue();
         let mut ended = Vec::new();
@@ -1212,7 +1308,7 @@ impl<B: Backend> Mixer<B> {
             if s.handle.state() != PlaybackState::Stopped {
                 return true;
             }
-            if s.channel == Channel::Music && loop_queue && !s.stopping && !s.failed {
+            if s.channel == Channel::Music && loop_queue && (!s.stopping || s.finished) && !s.failed {
                 ended.push((s.request.clone(), s.looping));
             }
             false
@@ -1384,6 +1480,8 @@ pub enum Command {
     PlayQueuedNow { id: u64 },
     MoveQueued { id: u64, to: usize },
     SwapWithPlaying { id: u64 },
+    MoveToChannel { id: u64, channel: Channel },
+    RequeuePlaying { id: u64, to: usize },
     PauseSound { id: u64, paused: bool, fade_ms: u32 },
     SeekSound { id: u64, position_ms: i64 },
     SetSoundTrim { id: u64, trim_db: f32 },
@@ -1620,6 +1718,14 @@ impl Engine {
         self.send(Command::MoveQueued { id, to }).map(|_| ())
     }
 
+    pub fn move_to_channel(&self, id: u64, channel: Channel) -> Result<()> {
+        self.send(Command::MoveToChannel { id, channel }).map(|_| ())
+    }
+
+    pub fn requeue_playing(&self, id: u64, to: usize) -> Result<()> {
+        self.send(Command::RequeuePlaying { id, to }).map(|_| ())
+    }
+
     pub fn swap_with_playing(&self, id: u64) -> Result<()> {
         self.send(Command::SwapWithPlaying { id }).map(|_| ())
     }
@@ -1771,6 +1877,14 @@ fn run<B: Backend>(mixer: &mut Mixer<B>, command: Command) -> Result<Reply> {
             mixer.move_queued(id, to);
             Ok(Reply::Done)
         }
+        Command::MoveToChannel { id, channel } => {
+            mixer.move_to_channel(id, channel)?;
+            Ok(Reply::Done)
+        }
+        Command::RequeuePlaying { id, to } => {
+            mixer.requeue_playing(id, to);
+            Ok(Reply::Done)
+        }
         Command::SwapWithPlaying { id } => {
             mixer.swap_with_playing(id);
             Ok(Reply::Done)
@@ -1895,6 +2009,8 @@ fn run_offline(
         | Command::PlayQueuedNow { .. }
         | Command::MoveQueued { .. }
         | Command::SwapWithPlaying { .. }
+        | Command::MoveToChannel { .. }
+        | Command::RequeuePlaying { .. }
         | Command::PauseSound { .. }
         | Command::SeekSound { .. }
         | Command::RetryDevice
@@ -2185,6 +2301,69 @@ mod tests {
         play_for(&mut m, 300);
         let resumed = m.state().sounds.iter().find(|s| s.id == third).unwrap().clone();
         assert!(!resumed.paused && resumed.position_ms > held.position_ms);
+    }
+
+    #[test]
+    fn a_trimmed_sound_starts_late_skips_its_cuts_and_ends_early() {
+        let f = files();
+        let mut m = mixer();
+        let trimmed = PlayRequest {
+            start_ms: 5_000,
+            end_ms: Some(12_000),
+            cuts: vec![(6_000, 10_000)],
+            ..req(&f.long, Channel::Music, 30_000)
+        };
+        let id = m.play(trimmed).unwrap();
+        let next = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        play_for(&mut m, 200);
+        let pos = m.state().sounds[0].position_ms;
+        assert!((5_000..5_600).contains(&pos), "started at {pos} ms");
+        // 5 s to 6 s plays, then the cut is skipped.
+        render_until(&mut m, |m| m.state().sounds[0].position_ms >= 10_000);
+        let pos = m.state().sounds[0].position_ms;
+        assert!((10_000..10_300).contains(&pos), "after the cut: {pos} ms");
+        // At 12 s it ends and the queue moves on; the track rejoins the queue.
+        render_until(&mut m, |m| m.state().sounds.iter().any(|s| s.id == next));
+        assert!(m.state().sounds.iter().all(|s| s.id != id || s.stopping));
+        play_for(&mut m, 300);
+        assert_eq!(music(&m).queue.len(), 1, "the trimmed track went back into the repeating queue");
+    }
+
+    #[test]
+    fn sounds_move_between_channels_and_always_loop_when_set() {
+        let f = files();
+        let mut m = mixer();
+        // A sound set to always loop repeats even as an effect.
+        let beat = m.play(PlayRequest { always_loop: true, ..req(&f.short, Channel::Sfx, 300) }).unwrap();
+        play_for(&mut m, 1_500);
+        assert!(m.state().sounds.iter().any(|s| s.id == beat && s.looping), "still going after five times its length");
+
+        // A playing music track moves to ambience and carries on from where it was.
+        let track = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        let queued = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        play_for(&mut m, 2_000);
+        m.move_to_channel(track, Channel::Ambience).unwrap();
+        play_for(&mut m, 300);
+        let s = m.state();
+        let moved = s.sounds.iter().find(|s| s.channel == Channel::Ambience && !s.stopping).expect("now on ambience");
+        assert!(moved.position_ms >= 2_000, "carried on at {} ms", moved.position_ms);
+        assert!(s.sounds.iter().any(|s| s.id == queued && !s.stopping), "the queue moved on");
+
+        // A queued track moves to another channel and starts there.
+        let waiting = m.play(req(&f.short, Channel::Music, 300)).unwrap();
+        m.move_to_channel(waiting, Channel::Stingers).unwrap();
+        assert!(music(&m).queue.is_empty());
+        assert!(m.state().sounds.iter().any(|s| s.channel == Channel::Stingers));
+
+        // The playing track goes back into the queue, behind the next one.
+        let a = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        let b = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        m.requeue_playing(queued, 2);
+        let s = m.state();
+        assert!(s.sounds.iter().any(|s| s.id == a && !s.stopping), "the next track plays");
+        let ids: Vec<u64> = music(&m).queue.iter().map(|q| q.id).collect();
+        assert_eq!(ids[0], b);
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]

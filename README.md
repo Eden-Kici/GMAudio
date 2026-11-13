@@ -3,7 +3,7 @@
 An audio control center for running tabletop RPG sessions: music, ambience and
 sound effects from your own files, on one screen. Windows 10/11.
 
-Version 0.6.0 (shown at the bottom of Settings, and in `VERSION`).
+Version 0.7.0 (shown at the bottom of Settings, and in `VERSION`).
 
 Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 
@@ -31,6 +31,10 @@ Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 - Music queue: next, repeat one track, repeat the queue, drag to reorder,
   drag onto the playing track to swap.
 - Seek bar and pause (at once or with a fade) on longer sounds.
+- Drag a playing or queued sound to another channel; drag from the library
+  to a place in the queue.
+- Per sound: always loop, and a trim (start, end, parts to skip) that
+  leaves the file untouched.
 - Stingers and chosen pads lower the music while they sound.
 - Audio profiles for headphones, laptop speakers, a table speaker, or custom.
 - **Esc** fades everything out. Press again to cut instantly.

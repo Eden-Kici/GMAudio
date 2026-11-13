@@ -97,7 +97,19 @@ export interface Asset {
   attribution: string | null;
   /** The user's own volume correction in dB. */
   trim_db: number;
+  /** Repeats whenever it is played, on any channel. */
+  always_loop: boolean;
+  /** Which parts of the file play; null plays all of it. */
+  edit: AssetEdit | null;
   tags: Tag[];
+}
+
+/** A trim of a sound. Times are milliseconds into the file. */
+export interface AssetEdit {
+  start_ms: number;
+  end_ms: number | null;
+  /** Skipped stretches as [from, to]. */
+  cuts: [number, number][];
 }
 
 /** How the whole mix is shaped for the speakers in use. */
@@ -308,6 +320,10 @@ export const api = {
   setLoopQueue: (on: boolean) => invoke<void>("engine_set_loop_queue", { on }),
   nextTrack: () => invoke<void>("engine_next_track"),
   playQueuedNow: (id: number) => invoke<void>("engine_play_queued_now", { id }),
+  moveToChannel: (id: number, channel: Channel) => invoke<void>("engine_move_to_channel", { id, channel }),
+  requeuePlaying: (id: number, to: number) => invoke<void>("engine_requeue_playing", { id, to }),
+  setAlwaysLoop: (assetId: number, on: boolean) => invoke<Asset>("library_set_always_loop", { assetId, on }),
+  setEdit: (assetId: number, edit: AssetEdit | null) => invoke<Asset>("library_set_edit", { assetId, edit }),
   swapWithPlaying: (id: number) => invoke<void>("engine_swap_with_playing", { id }),
   pauseSound: (id: number, paused: boolean, fadeMs: number) => invoke<void>("engine_pause", { id, paused, fadeMs }),
   youtubeImport: (url: string, channelTag: string | null) => invoke<Asset | null>("youtube_import", { url, channelTag }),

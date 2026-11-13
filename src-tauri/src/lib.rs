@@ -670,6 +670,26 @@ fn app_version(app: AppHandle) -> String {
 }
 
 #[tauri::command]
+fn engine_move_to_channel(state: State<'_, AppState>, id: u64, channel: Channel) -> CmdResult<()> {
+    state.engine.move_to_channel(id, channel).map_err(msg)
+}
+
+#[tauri::command]
+fn engine_requeue_playing(state: State<'_, AppState>, id: u64, to: usize) -> CmdResult<()> {
+    state.engine.requeue_playing(id, to).map_err(msg)
+}
+
+#[tauri::command]
+fn library_set_always_loop(state: State<'_, AppState>, asset_id: i64, on: bool) -> CmdResult<Asset> {
+    state.library.set_always_loop(asset_id, on).map_err(msg)
+}
+
+#[tauri::command]
+fn library_set_edit(state: State<'_, AppState>, asset_id: i64, edit: Option<gmaudio_core::model::AssetEdit>) -> CmdResult<Asset> {
+    state.library.set_edit(asset_id, edit).map_err(msg)
+}
+
+#[tauri::command]
 fn engine_swap_with_playing(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
     state.engine.swap_with_playing(id).map_err(msg)
 }
@@ -802,6 +822,10 @@ pub fn run() {
             library_set_trim,
             engine_move_queued,
             engine_swap_with_playing,
+            engine_move_to_channel,
+            engine_requeue_playing,
+            library_set_always_loop,
+            library_set_edit,
             engine_pause,
             youtube_import,
             app_version,

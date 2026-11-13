@@ -76,11 +76,16 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE assets ADD COLUMN trim_db REAL NOT NULL DEFAULT 0;
     ",
+    // 4: always-loop, and trims (start, end, cuts) kept as JSON
+    "
+    ALTER TABLE assets ADD COLUMN always_loop INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN edit TEXT;
+    ",
 ];
 
 const ASSET_COLUMNS: &str = "id, folder_id, path, name, ext, size, mtime, hash, duration_ms, \
      sample_rate, channels, loudness_lufs, gain_db, bpm, beat_offset_ms, status, error, missing, \
-     source, license, attribution, trim_db";
+     source, license, attribution, trim_db, always_loop, edit";
 
 /// A file found on disk during a folder scan.
 #[derive(Debug, Clone)]
@@ -141,6 +146,8 @@ fn asset_from_row(row: &Row) -> rusqlite::Result<Asset> {
         license: row.get(19)?,
         attribution: row.get(20)?,
         trim_db: row.get(21)?,
+        always_loop: row.get(22)?,
+        edit: row.get::<_, Option<String>>(23)?.and_then(|json| serde_json::from_str(&json).ok()),
         tags: Vec::new(),
     })
 }
@@ -558,6 +565,20 @@ impl Db {
     pub fn set_trim(&self, asset_id: i64, trim_db: f64) -> Result<()> {
         self.conn
             .execute("UPDATE assets SET trim_db = ?2 WHERE id = ?1", params![asset_id, trim_db])?;
+        Ok(())
+    }
+
+    pub fn set_always_loop(&self, asset_id: i64, on: bool) -> Result<()> {
+        self.conn
+            .execute("UPDATE assets SET always_loop = ?2 WHERE id = ?1", params![asset_id, on])?;
+        Ok(())
+    }
+
+    /// Stores which parts of a sound play. `None` plays the whole file.
+    pub fn set_edit(&self, asset_id: i64, edit: Option<&crate::model::AssetEdit>) -> Result<()> {
+        let json = edit.map(|e| serde_json::to_string(e).unwrap_or_default());
+        self.conn
+            .execute("UPDATE assets SET edit = ?2 WHERE id = ?1", params![asset_id, json])?;
         Ok(())
     }
 
