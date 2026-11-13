@@ -384,6 +384,12 @@ impl Handle {
             Handle::Streaming(h) => h.position(),
         }
     }
+    fn seek_to(&mut self, seconds: f64) {
+        match self {
+            Handle::Static(h) => h.seek_to(seconds),
+            Handle::Streaming(h) => h.seek_to(seconds),
+        }
+    }
     fn stop(&mut self, tween: Tween) {
         match self {
             Handle::Static(h) => h.stop(tween),
@@ -837,6 +843,24 @@ impl<B: Backend> Mixer<B> {
             self.queue.push_front(item);
         }
         self.next_track();
+    }
+
+    /// Moves a queued track to another place in the queue (0 = next up).
+    pub fn move_queued(&mut self, id: u64, to: usize) {
+        let Some(at) = self.queue.iter().position(|q| q.id == id) else { return };
+        if let Some(item) = self.queue.remove(at) {
+            let to = to.min(self.queue.len());
+            self.queue.insert(to, item);
+        }
+    }
+
+    /// Jumps a playing sound to another point in the file.
+    pub fn seek_sound(&mut self, id: u64, position_ms: i64) {
+        if let Some(s) = self.sounds.iter_mut().find(|s| s.id == id && !s.stopping) {
+            // Stay clear of the very end, where a seek would just finish the sound.
+            let end = s.duration_ms.map_or(i64::MAX, |d| (d - 200).max(0));
+            s.handle.seek_to(position_ms.clamp(0, end) as f64 / 1000.0);
+        }
     }
 
     /// Sets whether a playing or queued sound repeats until stopped.
@@ -1309,6 +1333,8 @@ pub enum Command {
     NextTrack,
     /// Crossfade to this queued music track now.
     PlayQueuedNow { id: u64 },
+    MoveQueued { id: u64, to: usize },
+    SeekSound { id: u64, position_ms: i64 },
     SetSoundTrim { id: u64, trim_db: f32 },
     SetChannelSolo { channel: Channel, solo: bool },
     SetDuckDb { db: f32 },
@@ -1539,6 +1565,14 @@ impl Engine {
         self.send(Command::PlayQueuedNow { id }).map(|_| ())
     }
 
+    pub fn move_queued(&self, id: u64, to: usize) -> Result<()> {
+        self.send(Command::MoveQueued { id, to }).map(|_| ())
+    }
+
+    pub fn seek_sound(&self, id: u64, position_ms: i64) -> Result<()> {
+        self.send(Command::SeekSound { id, position_ms }).map(|_| ())
+    }
+
     pub fn set_sound_trim(&self, id: u64, trim_db: f32) -> Result<()> {
         self.send(Command::SetSoundTrim { id, trim_db }).map(|_| ())
     }
@@ -1674,6 +1708,14 @@ fn run<B: Backend>(mixer: &mut Mixer<B>, command: Command) -> Result<Reply> {
             mixer.play_queued_now(id);
             Ok(Reply::Done)
         }
+        Command::MoveQueued { id, to } => {
+            mixer.move_queued(id, to);
+            Ok(Reply::Done)
+        }
+        Command::SeekSound { id, position_ms } => {
+            mixer.seek_sound(id, position_ms);
+            Ok(Reply::Done)
+        }
         Command::SetSoundTrim { id, trim_db } => {
             mixer.set_sound_trim(id, trim_db);
             Ok(Reply::Done)
@@ -1784,6 +1826,8 @@ fn run_offline(
         | Command::SetSoundLooping { .. }
         | Command::NextTrack
         | Command::PlayQueuedNow { .. }
+        | Command::MoveQueued { .. }
+        | Command::SeekSound { .. }
         | Command::RetryDevice
         | Command::Reopen => Ok(Reply::Done),
     }
@@ -2012,6 +2056,31 @@ mod tests {
         let queue: Vec<u64> = music(&m).queue.iter().map(|q| q.id).collect();
         assert_eq!(queue, [third]);
         assert_eq!(m.sound_count(), 1);
+    }
+
+    #[test]
+    fn queued_tracks_can_be_reordered_and_a_playing_one_seeked() {
+        let f = files();
+        let mut m = mixer();
+        let first = m.play(req(&f.long, Channel::Music, 30_000)).unwrap();
+        let ids: Vec<u64> = (0..3).map(|_| m.play(req(&f.long, Channel::Music, 30_000)).unwrap()).collect();
+        let queue = |m: &Mixer<MockBackend>| music(m).queue.iter().map(|q| q.id).collect::<Vec<u64>>();
+
+        m.move_queued(ids[2], 0);
+        assert_eq!(queue(&m), [ids[2], ids[0], ids[1]]);
+        m.move_queued(ids[2], 99);
+        assert_eq!(queue(&m), [ids[0], ids[1], ids[2]], "past the end means last");
+        m.move_queued(first, 1);
+        assert_eq!(queue(&m), [ids[0], ids[1], ids[2]], "the playing track is not in the queue");
+
+        play_for(&mut m, 100);
+        m.seek_sound(first, 20_000);
+        render_until(&mut m, |m| m.state().sounds[0].position_ms >= 20_000);
+        let pos = m.state().sounds[0].position_ms;
+        assert!((20_000..21_000).contains(&pos), "jumped to {pos} ms");
+        m.seek_sound(first, 999_999);
+        render_until(&mut m, |m| m.state().sounds[0].position_ms >= 29_000);
+        assert_eq!(m.state().sounds[0].id, first, "a seek past the end stops just short of it");
     }
 
     #[test]

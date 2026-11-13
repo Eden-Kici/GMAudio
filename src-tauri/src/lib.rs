@@ -428,6 +428,16 @@ fn engine_command_log(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tauri::command]
+fn engine_move_queued(state: State<'_, AppState>, id: u64, to: usize) -> CmdResult<()> {
+    state.engine.move_queued(id, to).map_err(msg)
+}
+
+#[tauri::command]
+fn engine_seek(state: State<'_, AppState>, id: u64, position_ms: i64) -> CmdResult<()> {
+    state.engine.seek_sound(id, position_ms).map_err(msg)
+}
+
+#[tauri::command]
 fn library_set_trim(state: State<'_, AppState>, asset_id: i64, trim_db: f64) -> CmdResult<Asset> {
     state.library.set_trim(asset_id, trim_db).map_err(msg)
 }
@@ -724,6 +734,8 @@ pub fn run() {
             engine_retry_device,
             engine_command_log,
             library_set_trim,
+            engine_move_queued,
+            engine_seek,
             library_credits,
             engine_set_profile,
             freesound_status,

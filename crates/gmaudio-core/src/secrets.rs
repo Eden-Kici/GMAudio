@@ -1,8 +1,9 @@
 //! Keys and sign-in tokens, kept in the operating system's credential
 //! store (Windows Credential Manager) rather than in the library file.
 //!
-//! If that store cannot be reached, the value is kept in the library's
-//! settings instead, so the feature still works.
+//! A copy is also kept in the library's settings: on some Windows setups
+//! the credential store accepted a value and did not return it after a
+//! restart, and a key that has to be typed in every time is worse.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -43,9 +44,8 @@ pub fn get(library: &Library, name: &str) -> Option<String> {
 }
 
 pub fn set(library: &Library, name: &str, value: &str) {
-    let stored = keyring::Entry::new(SERVICE, name).and_then(|entry| entry.set_password(value)).is_ok();
-    // Keep exactly one copy: in the settings only when the store refused it.
-    let _ = library.set_setting(&fallback_key(name), if stored { "" } else { value });
+    let _ = keyring::Entry::new(SERVICE, name).and_then(|entry| entry.set_password(value));
+    let _ = library.set_setting(&fallback_key(name), value);
     remember(name, Some(value));
 }
 

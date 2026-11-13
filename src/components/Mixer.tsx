@@ -208,8 +208,8 @@ function Strip({ id, label, hint, color, state, sounds, emitters, index }: Strip
               <Emitter key={e.id} emitter={e} />
             ))}
             {queue.length > 0 && <p className="pt-1 text-[11px] font-medium uppercase tracking-wider text-faint">Up next</p>}
-            {queue.map((q) => (
-              <Queued key={q.id} item={q} />
+            {queue.map((q, i) => (
+              <Queued key={q.id} item={q} index={i} />
             ))}
           </>
         )}
@@ -237,11 +237,59 @@ function LoopToggle({ id, on, name }: { id: number; on: boolean; name: string })
 function Playing({ sound, color }: { sound: SoundState; color: string }) {
   const stop = useStore((s) => s.stopSound);
   const duration = sound.duration_ms;
-  const progress = duration ? Math.min(1, sound.position_ms / duration) : 0;
+  /** Where the pointer is while dragging along the bar, 0 to 1. */
+  const [drag, setDrag] = useState<number | null>(null);
+  const progress = drag ?? (duration ? Math.min(1, sound.position_ms / duration) : 0);
+  // Worth a seek bar: long enough to want to jump around in.
+  const seekable = !!duration && duration >= 5000 && !sound.stopping;
+  const at = (e: React.PointerEvent<HTMLDivElement>) => {
+    const box = e.currentTarget.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
+  };
 
   return (
     <div className={`relative overflow-hidden rounded-md bg-raised ${sound.stopping ? "opacity-50" : ""}`}>
       <span className="absolute inset-y-0 left-0 opacity-25" style={{ width: `${progress * 100}%`, background: color }} />
+      {seekable && (
+        <div
+          role="slider"
+          aria-label={`Position in ${sound.name}`}
+          aria-valuemin={0}
+          aria-valuemax={Math.round(duration / 1000)}
+          aria-valuenow={Math.round((progress * duration) / 1000)}
+          aria-valuetext={formatTime(progress * duration)}
+          tabIndex={0}
+          title="Click or drag to jump to another point. Arrow keys: 5 seconds."
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            setDrag(at(e));
+          }}
+          onPointerMove={(e) => {
+            if (drag !== null) setDrag(at(e));
+          }}
+          onPointerUp={(e) => {
+            if (drag === null) return;
+            void api.seek(sound.id, Math.round(at(e) * duration));
+            // Hold the bar where it was dropped until the engine reports the jump.
+            setTimeout(() => setDrag(null), 150);
+          }}
+          onPointerCancel={() => setDrag(null)}
+          onKeyDown={(e) => {
+            const step = e.key === "ArrowRight" ? 5000 : e.key === "ArrowLeft" ? -5000 : 0;
+            if (!step) return;
+            e.preventDefault();
+            e.stopPropagation();
+            void api.seek(sound.id, Math.max(0, sound.position_ms + step));
+          }}
+          className="group absolute inset-x-0 bottom-0 z-10 h-2.5 cursor-pointer touch-none"
+        >
+          <span className="absolute inset-x-0 bottom-0 h-0.5 bg-line transition-[height] group-hover:h-1.5" />
+          <span
+            className="absolute bottom-0 left-0 h-0.5 transition-[height] group-hover:h-1.5"
+            style={{ width: `${progress * 100}%`, background: color }}
+          />
+        </div>
+      )}
       <div className="relative flex h-8 items-center gap-1.5 pl-2.5 pr-1">
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{sound.name}</span>
         {sound.channel === "ambience" && sound.looping && !sound.stopping && (
@@ -258,7 +306,7 @@ function Playing({ sound, color }: { sound: SoundState; color: string }) {
           />
         )}
         <span className="shrink-0 text-[11px] tabular-nums text-dim">
-          {sound.stopping ? "Fading out" : `${formatTime(sound.position_ms)} / ${formatTime(duration)}`}
+          {sound.stopping ? "Fading out" : `${formatTime(drag !== null && duration ? drag * duration : sound.position_ms)} / ${formatTime(duration)}`}
         </span>
         {!sound.stopping && <LoopToggle id={sound.id} on={sound.looping} name={sound.name} />}
         <button
@@ -297,10 +345,37 @@ function Emitter({ emitter }: { emitter: EmitterState }) {
   );
 }
 
-function Queued({ item }: { item: QueuedState }) {
+const QUEUE_DRAG = "application/x-gmaudio-queue";
+
+function Queued({ item, index }: { item: QueuedState; index: number }) {
   const remove = useStore((s) => s.stopSound);
+  const [over, setOver] = useState(false);
   return (
-    <div className="flex h-7 items-center gap-1.5 rounded-md border border-line pl-2.5 pr-1">
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(QUEUE_DRAG, String(item.id));
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes(QUEUE_DRAG)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        const id = Number(e.dataTransfer.getData(QUEUE_DRAG));
+        setOver(false);
+        if (!id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (id !== item.id) void api.moveQueued(id, index);
+      }}
+      title="Drag to change the order"
+      className={`flex h-7 cursor-grab items-center gap-1.5 rounded-md border pl-2.5 pr-1 active:cursor-grabbing ${over ? "border-accent bg-accent/10" : "border-line"}`}
+    >
       <span className="min-w-0 flex-1 truncate text-xs text-dim">{item.name}</span>
       <span className="shrink-0 text-[11px] tabular-nums text-faint">{formatTime(item.duration_ms)}</span>
       <button
