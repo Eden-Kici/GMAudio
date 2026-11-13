@@ -355,14 +355,9 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
             onClose();
           }}
         />
-        <span className="flex items-center gap-2">
-          <button onClick={() => void activateScene({ id: scene.id, data })} className={buttonClass} title="Switch to this scene now, to hear it">
-            Try it
-          </button>
-          <button onClick={onClose} className={primaryClass} title="Changes are kept as you make them; this closes the editor">
-            Save
-          </button>
-        </span>
+        <button onClick={onClose} className={primaryClass} title="Changes are kept as you make them; this closes the editor">
+          Save
+        </button>
       </div>
 
       {addingLayer && (

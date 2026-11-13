@@ -1,6 +1,6 @@
 [package]
 name = "gmaudio"
-version = "0.9.1"
+version = "0.9.2"
 description = "Audio control center for running tabletop RPG sessions"
 authors = ["Eden Kici"]
 edition = "2024"

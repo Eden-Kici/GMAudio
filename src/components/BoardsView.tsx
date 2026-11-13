@@ -426,8 +426,8 @@ function PadEditor({ board, index, onClose }: { board: Doc<Board>; index: number
             onClose();
           }}
         />
-        <button onPointerDown={() => void triggerPad(board.id, index, pad, "down")} onPointerUp={() => void triggerPad(board.id, index, pad, "up")} className={primaryClass}>
-          Try it
+        <button onClick={onClose} className={primaryClass} title="Changes are kept as you make them; this closes the editor">
+          Save
         </button>
       </div>
     </aside>

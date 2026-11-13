@@ -407,8 +407,8 @@ function SetEditor({ set, onClose }: { set: Doc<MusicSet>; onClose: () => void }
             onClose();
           }}
         />
-        <button onClick={() => void playSet({ id: set.id, data })} className={primaryClass}>
-          Try it
+        <button onClick={onClose} className={primaryClass} title="Changes are kept as you make them; this closes the editor">
+          Save
         </button>
       </div>
     </aside>
