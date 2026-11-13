@@ -190,6 +190,74 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     })
 }
 
+/// The outline of a sound for drawing: the loudest sample in each of
+/// `buckets` equal slices of the file, 0 to 1. `duration_ms` is the
+/// file's known length, used to place samples without a first pass.
+pub fn waveform(path: &Path, buckets: usize, duration_ms: i64) -> Result<Vec<f32>> {
+    let buckets = buckets.clamp(1, 4000);
+    let file = File::open(path)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, mss, Default::default(), Default::default())
+        .map_err(decode_err)?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| Error::Decode("no audio track in file".into()))?;
+    let track_id = track.id;
+    let params = match track.codec_params.as_ref() {
+        Some(CodecParameters::Audio(p)) => p.clone(),
+        _ => return Err(Error::Decode("no audio track in file".into())),
+    };
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&params, &Default::default())
+        .map_err(decode_err)?;
+
+    let mut peaks = vec![0f32; buckets];
+    let mut samples: Vec<f32> = Vec::new();
+    let mut frame: u64 = 0;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(SymError::ResetRequired) => break,
+            Err(e) => return Err(decode_err(e)),
+        };
+        if packet.track_id != track_id {
+            continue;
+        }
+        let buffer = match decoder.decode(&packet) {
+            Ok(b) => b,
+            Err(SymError::DecodeError(_)) => continue,
+            Err(_) => break,
+        };
+        let channels = buffer.num_planes().max(1);
+        let total = ((duration_ms.max(1) as u64) * buffer.spec().rate() as u64 / 1000).max(1);
+        samples.clear();
+        buffer.copy_to_vec_interleaved::<f32>(&mut samples);
+        for chunk in samples.chunks(channels) {
+            let at = ((frame * buckets as u64) / total).min(buckets as u64 - 1) as usize;
+            let level = chunk.iter().fold(0f32, |m, s| m.max(s.abs()));
+            if level > peaks[at] {
+                peaks[at] = level;
+            }
+            frame += 1;
+        }
+    }
+    // Stretch quiet recordings to fill the picture; the shape is what matters.
+    let top = peaks.iter().cloned().fold(0f32, f32::max);
+    if top > 0.0 {
+        for p in &mut peaks {
+            *p = (*p / top).min(1.0);
+        }
+    }
+    Ok(peaks)
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::f32::consts::TAU;
@@ -233,6 +301,19 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::write_sine_wav;
     use super::*;
+
+    #[test]
+    fn a_waveform_follows_the_loud_and_quiet_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tone.wav");
+        testutil::write_sine_wav(&path, 2.0, 440.0, -6.0, 2);
+        let peaks = waveform(&path, 100, 2_000).unwrap();
+        assert_eq!(peaks.len(), 100);
+        assert!(peaks.iter().all(|p| *p > 0.9 && *p <= 1.0), "a steady tone is level throughout");
+        // Told the file is twice as long, the sound fills the first half only.
+        let half = waveform(&path, 100, 4_000).unwrap();
+        assert!(half[..49].iter().all(|p| *p > 0.9) && half[51..].iter().all(|p| *p == 0.0));
+    }
 
     #[test]
     fn measures_duration_and_loudness_of_a_sine() {

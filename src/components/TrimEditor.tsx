@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { api, assetChannels, type Asset, type AssetEdit } from "../api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, type Asset, type AssetEdit } from "../api";
 import { formatTime } from "../format";
 import { message, useStore } from "../store";
-import { CloseIcon, PlusIcon } from "./icons";
+import { CloseIcon, PlayIcon, PlusIcon, StopIcon } from "./icons";
 import { buttonClass, inputBase, Modal, primaryClass } from "./ui";
 
 /** 83500 → "1:23.5" */
@@ -28,113 +28,322 @@ export function editedLength(duration: number, edit: AssetEdit | null): number {
   return Math.max(0, (edit.end_ms ?? duration) - edit.start_ms - cut);
 }
 
-function TimeBox({ value, onChange, placeholder, label }: { value: string; onChange: (v: string) => void; placeholder?: string; label: string }) {
-  const bad = value.trim() !== "" && parseTime(value) === null;
+/** A time field: free typing, taken over when it is a valid time. */
+function TimeBox({ value, onChange, placeholder, label }: { value: number | null; onChange: (ms: number | null) => void; placeholder?: string; label: string }) {
+  const [text, setText] = useState<string | null>(null);
+  const shown = text ?? (value === null ? "" : formatExact(value));
+  const bad = text !== null && text.trim() !== "" && parseTime(text) === null;
+  const commit = () => {
+    if (text === null) return;
+    if (text.trim() === "") onChange(null);
+    else if (parseTime(text) !== null) onChange(parseTime(text));
+    setText(null);
+  };
   return (
     <input
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
+      value={shown}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+      }}
       placeholder={placeholder}
       aria-label={label}
       aria-invalid={bad}
       spellCheck={false}
-      className={`${inputBase} h-9 w-24 text-center tabular-nums ${bad ? "border-danger" : ""}`}
+      className={`${inputBase} h-8 w-20 text-center text-xs tabular-nums ${bad ? "border-danger" : ""}`}
     />
+  );
+}
+
+type Grip = { kind: "start" } | { kind: "end" } | { kind: "cut"; index: number; edge: 0 | 1 };
+
+/** The sound drawn out, with the kept and skipped parts marked and handles to drag. */
+function Timeline({
+  peaks,
+  duration,
+  start,
+  end,
+  cuts,
+  playhead,
+  onStart,
+  onEnd,
+  onCut,
+  onSeek,
+}: {
+  peaks: number[] | null;
+  duration: number;
+  start: number;
+  end: number;
+  cuts: [number, number][];
+  playhead: number | null;
+  onStart: (ms: number) => void;
+  onEnd: (ms: number) => void;
+  onCut: (index: number, edge: 0 | 1, ms: number) => void;
+  onSeek: (ms: number) => void;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const [grip, setGrip] = useState<Grip | null>(null);
+  const pct = (ms: number) => `${(Math.min(duration, Math.max(0, ms)) / duration) * 100}%`;
+  const at = (clientX: number) => {
+    const r = box.current!.getBoundingClientRect();
+    return Math.round((Math.min(1, Math.max(0, (clientX - r.left) / r.width)) * duration) / 100) * 100;
+  };
+  const shape = useMemo(() => {
+    if (!peaks || peaks.length === 0) return "";
+    const n = peaks.length;
+    let top = "";
+    let bottom = "";
+    peaks.forEach((p, i) => {
+      const x = ((i + 0.5) / n) * 1000;
+      const h = Math.max(0.5, p * 46);
+      top += `${i === 0 ? "M" : "L"}${x.toFixed(1)},${(50 - h).toFixed(1)}`;
+      bottom = `L${x.toFixed(1)},${(50 + h).toFixed(1)}` + bottom;
+    });
+    return `${top}${bottom}Z`;
+  }, [peaks]);
+
+  // While a handle is held, follow the pointer anywhere in the window. The
+  // latest values are read through a ref, so the listeners are set up once per drag.
+  const latest = useRef({ start, end, onStart, onEnd, onCut });
+  latest.current = { start, end, onStart, onEnd, onCut };
+  useEffect(() => {
+    if (!grip) return;
+    const move = (e: PointerEvent) => {
+      const now = latest.current;
+      const ms = at(e.clientX);
+      if (grip.kind === "start") now.onStart(Math.min(ms, now.end - 200));
+      else if (grip.kind === "end") now.onEnd(Math.max(ms, now.start + 200));
+      else now.onCut(grip.index, grip.edge, ms);
+    };
+    const drop = () => setGrip(null);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", drop);
+    window.addEventListener("pointercancel", drop);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", drop);
+      window.removeEventListener("pointercancel", drop);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grip]);
+  const handle = (g: Grip, ms: number, color: string, label: string) => (
+    <div
+      key={label}
+      role="slider"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={Math.round(duration / 1000)}
+      aria-valuenow={Math.round(ms / 1000)}
+      aria-valuetext={formatExact(ms)}
+      tabIndex={0}
+      title={`${label}: ${formatExact(ms)}. Drag, or use the arrow keys.`}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        setGrip(g);
+      }}
+      onKeyDown={(e) => {
+        const step = e.key === "ArrowRight" ? 100 : e.key === "ArrowLeft" ? -100 : 0;
+        if (!step) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const to = ms + step * (e.shiftKey ? 10 : 1);
+        if (g.kind === "start") onStart(Math.min(Math.max(0, to), end - 200));
+        else if (g.kind === "end") onEnd(Math.max(Math.min(duration, to), start + 200));
+        else onCut(g.index, g.edge, to);
+      }}
+      style={{ left: pct(ms) }}
+      className="absolute inset-y-0 z-20 -ml-2 w-4 cursor-ew-resize touch-none"
+    >
+      <span className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2" style={{ background: color }} />
+      <span className="absolute left-1/2 top-1/2 h-6 w-2 -translate-x-1/2 -translate-y-1/2 rounded-sm" style={{ background: color }} />
+    </div>
+  );
+
+  return (
+    <div>
+      <div
+        ref={box}
+        onPointerDown={(e) => onSeek(at(e.clientX))}
+        title="Click to listen from that point"
+        className="relative h-28 cursor-pointer select-none overflow-hidden rounded-lg bg-bg"
+      >
+        <svg viewBox="0 0 1000 100" preserveAspectRatio="none" className="absolute inset-0 size-full text-dim">
+          {shape ? <path d={shape} fill="currentColor" /> : <line x1="0" y1="50" x2="1000" y2="50" stroke="currentColor" strokeWidth="1" />}
+        </svg>
+        {!peaks && <span className="absolute inset-0 flex items-center justify-center text-xs text-faint">Drawing the sound…</span>}
+        {/* What does not play: before the start, after the end, and the skipped parts. */}
+        <span className="absolute inset-y-0 left-0 bg-bg/80" style={{ width: pct(start) }} />
+        <span className="absolute inset-y-0 right-0 bg-bg/80" style={{ left: pct(end) }} />
+        {cuts.map(([from, to], i) => (
+          <span
+            key={i}
+            className="absolute inset-y-0 border-x border-danger/60 bg-danger/25"
+            style={{ left: pct(from), width: `${(Math.max(0, to - from) / duration) * 100}%` }}
+          />
+        ))}
+        {playhead !== null && <span className="absolute inset-y-0 z-10 w-px bg-ink" style={{ left: pct(playhead) }} />}
+        {handle({ kind: "start" }, start, "var(--color-accent)", "Start")}
+        {handle({ kind: "end" }, end, "var(--color-accent)", "End")}
+        {cuts.flatMap(([from, to], i) => [
+          handle({ kind: "cut", index: i, edge: 0 }, from, "var(--color-danger)", `Skip ${i + 1} from`),
+          handle({ kind: "cut", index: i, edge: 1 }, to, "var(--color-danger)", `Skip ${i + 1} to`),
+        ])}
+      </div>
+      <div className="mt-1 flex justify-between text-[11px] tabular-nums text-faint">
+        <span>0:00</span>
+        <span>{formatTime(duration / 2)}</span>
+        <span>{formatTime(duration)}</span>
+      </div>
+    </div>
   );
 }
 
 /** Chooses which parts of a sound play. The file itself is not changed. */
 export function TrimEditor({ asset, onClose }: { asset: Asset; onClose: () => void }) {
-  const duration = asset.duration_ms ?? 0;
-  const [start, setStart] = useState(asset.edit?.start_ms ? formatExact(asset.edit.start_ms) : "");
-  const [end, setEnd] = useState(asset.edit?.end_ms != null ? formatExact(asset.edit.end_ms) : "");
-  const [cuts, setCuts] = useState<[string, string][]>(asset.edit?.cuts.map(([a, b]) => [formatExact(a), formatExact(b)]) ?? []);
-  /** Where this sound is right now, if it is playing. */
-  const live = useStore((s) => s.engine?.sounds.find((x) => x.asset_id === asset.id && !x.stopping)?.position_ms ?? null);
-  const here = live === null ? "" : formatExact(live);
+  const duration = Math.max(1, asset.duration_ms ?? 1);
+  const [start, setStart] = useState(asset.edit?.start_ms ?? 0);
+  const [end, setEnd] = useState<number | null>(asset.edit?.end_ms ?? null);
+  const [cuts, setCuts] = useState<[number, number][]>(asset.edit?.cuts ?? []);
+  const [peaks, setPeaks] = useState<number[] | null>(null);
+  /** The preview that is sounding, if any. */
+  const [previewId, setPreviewId] = useState<number | null>(null);
+  /** Where the last click on the timeline was. */
+  const [cursor, setCursor] = useState<number | null>(null);
+  const previewing = useStore((s) => (previewId === null ? null : (s.engine?.sounds.find((x) => x.id === previewId && !x.stopping) ?? null)));
+  const playhead = previewing ? previewing.position_ms : cursor;
 
-  const edit: AssetEdit = {
-    start_ms: parseTime(start) ?? 0,
-    end_ms: end.trim() ? parseTime(end) : null,
-    cuts: cuts.flatMap(([a, b]) => {
-      const from = parseTime(a);
-      const to = parseTime(b);
-      return from !== null && to !== null && to > from ? [[from, to] as [number, number]] : [];
-    }),
+  useEffect(() => {
+    void api
+      .waveform(asset.id, 600)
+      .then(setPeaks)
+      .catch(() => setPeaks([]));
+  }, [asset.id]);
+  // Closing the editor ends the preview.
+  const live = useRef<number | null>(null);
+  live.current = previewing ? previewId : null;
+  useEffect(
+    () => () => {
+      if (live.current !== null) void api.stopSound(live.current);
+    },
+    [],
+  );
+
+  const last = end ?? duration;
+  const edit: AssetEdit = { start_ms: start, end_ms: end, cuts: cuts.filter(([a, b]) => b > a) };
+  const whole = start === 0 && end === null && edit.cuts.length === 0;
+  const fail = (e: unknown) => useStore.getState().notify(message(e));
+
+  const stopPreview = async () => {
+    if (previewId !== null) await api.stopSound(previewId).catch(() => {});
+    setPreviewId(null);
   };
-  const invalid =
-    (start.trim() !== "" && parseTime(start) === null) ||
-    (end.trim() !== "" && parseTime(end) === null) ||
-    cuts.some(([a, b]) => parseTime(a) === null || parseTime(b) === null || parseTime(b)! <= parseTime(a)!) ||
-    (edit.end_ms !== null && edit.end_ms <= edit.start_ms);
-
-  const save = async (thenPlay: boolean) => {
+  const preview = async (from: number | null) => {
     try {
-      const whole = edit.start_ms === 0 && edit.end_ms === null && edit.cuts.length === 0;
+      await stopPreview();
+      setPreviewId(await api.preview(asset.id, whole ? null : edit, from));
+    } catch (e) {
+      fail(e);
+    }
+  };
+  const setCut = (index: number, edge: 0 | 1, ms: number) =>
+    setCuts((list) =>
+      list.map((c, i) => {
+        if (i !== index) return c;
+        const to = Math.min(duration, Math.max(0, ms));
+        return edge === 0 ? [Math.min(to, c[1] - 100), c[1]] : [c[0], Math.max(to, c[0] + 100)];
+      }),
+    );
+  const addCut = () => {
+    // Start the new skip where the playhead is, a tenth of the sound long.
+    const from = Math.min(Math.max(playhead ?? start + (last - start) / 2, start), last - 200);
+    setCuts([...cuts, [Math.round(from), Math.round(Math.min(last, from + Math.max(500, duration / 10)))]]);
+  };
+  const save = async () => {
+    try {
+      await stopPreview();
       await api.setEdit(asset.id, whole ? null : edit);
       await useStore.getState().refresh();
-      if (thenPlay) {
-        // Restart it where it is playing; otherwise on the channel it is tagged for.
-        const playing = useStore.getState().engine?.sounds.find((x) => x.asset_id === asset.id && !x.stopping);
-        if (playing) await api.stopSound(playing.id);
-        await api.play(asset.id, playing?.channel ?? assetChannels(asset)[0] ?? "sfx", { interrupt: true });
-      } else {
-        onClose();
-      }
+      onClose();
     } catch (e) {
-      useStore.getState().notify(message(e));
+      fail(e);
     }
   };
 
-  const useHere = "rounded px-1.5 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/10";
-  const row = "flex items-center gap-2 text-sm";
-
+  const row = "flex items-center gap-2 text-xs";
   return (
-    <Modal title={`Trim “${asset.name}”`} onClose={onClose}>
-      <div className="space-y-4 p-4">
+    <Modal title={`Trim “${asset.name}”`} onClose={onClose} wide>
+      <div className="space-y-4 overflow-y-auto p-4">
         <p className="text-xs leading-relaxed text-faint">
-          Choose which parts play. Times are minutes:seconds into the file, such as 1:23.5. The file on disk is not
-          changed, and you can undo this at any time.
+          Drag the orange handles to set where the sound starts and ends. Red parts are skipped. Click anywhere on the
+          picture to listen from there. The file on disk is not changed.
         </p>
 
-        <div className={row}>
-          <span className="w-24 text-dim">Start at</span>
-          <TimeBox value={start} onChange={setStart} placeholder="0:00.0" label="Start time" />
-          {here && (
-            <button onClick={() => setStart(here)} className={useHere}>
-              Use {here}
-            </button>
-          )}
-        </div>
-        <div className={row}>
-          <span className="w-24 text-dim">End at</span>
-          <TimeBox value={end} onChange={setEnd} placeholder={formatExact(duration)} label="End time" />
-          {here && (
-            <button onClick={() => setEnd(here)} className={useHere}>
-              Use {here}
-            </button>
-          )}
+        <Timeline
+          peaks={peaks}
+          duration={duration}
+          start={start}
+          end={last}
+          cuts={cuts}
+          playhead={playhead}
+          onStart={(ms) => setStart(Math.max(0, ms))}
+          onEnd={(ms) => setEnd(ms >= duration ? null : ms)}
+          onCut={setCut}
+          onSeek={(ms) => {
+            setCursor(ms);
+            void preview(ms);
+          }}
+        />
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <button
+            onClick={() => void (previewing ? stopPreview() : preview(null))}
+            className={`${buttonClass} flex items-center gap-2`}
+            title="Plays through the Sound effects channel, with the trim as it is set now"
+          >
+            {previewing ? <StopIcon width={12} height={12} /> : <PlayIcon width={12} height={12} />}
+            {previewing ? "Stop" : "Listen from the start"}
+          </button>
+          <span className="text-xs tabular-nums text-dim">
+            {previewing ? `${formatExact(previewing.position_ms)} · ` : ""}
+            Plays for {formatTime(editedLength(duration, edit))} of {formatTime(duration)}
+          </span>
+          <span className={`${row} ml-auto`}>
+            <span className="text-dim">Start</span>
+            <TimeBox value={start} onChange={(ms) => setStart(Math.min(Math.max(0, ms ?? 0), last - 200))} label="Start time" />
+            <span className="text-dim">End</span>
+            <TimeBox
+              value={end}
+              onChange={(ms) => setEnd(ms === null || ms >= duration ? null : Math.max(ms, start + 200))}
+              placeholder={formatExact(duration)}
+              label="End time"
+            />
+          </span>
         </div>
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-dim">Skip these parts</span>
-            <button onClick={() => setCuts([...cuts, [here, ""]])} className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-dim hover:bg-raised hover:text-ink">
+            <span className="text-sm text-dim">Parts to skip</span>
+            <button onClick={addCut} className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-dim hover:bg-raised hover:text-ink">
               <PlusIcon width={12} height={12} /> Add a part to skip
             </button>
           </div>
-          {cuts.length === 0 && <p className="text-xs text-faint">Nothing is skipped.</p>}
+          {cuts.length === 0 && <p className="text-xs text-faint">Nothing is skipped. A new skip appears where you last clicked; drag its red edges.</p>}
           {cuts.map(([from, to], i) => (
             <div key={i} className={row}>
-              <span className="w-24 text-xs text-faint">from</span>
-              <TimeBox value={from} onChange={(v) => setCuts(cuts.map((c, j) => (j === i ? [v, c[1]] : c)))} label={`Skip ${i + 1} from`} />
-              <span className="text-xs text-faint">to</span>
-              <TimeBox value={to} onChange={(v) => setCuts(cuts.map((c, j) => (j === i ? [c[0], v] : c)))} label={`Skip ${i + 1} to`} />
-              {here && (
-                <button onClick={() => setCuts(cuts.map((c, j) => (j === i ? [c[0], here] : c)))} className={useHere}>
-                  to {here}
-                </button>
-              )}
+              <span className="size-2.5 rounded-sm bg-danger/70" />
+              <span className="text-faint">from</span>
+              <TimeBox value={from} onChange={(ms) => ms !== null && setCut(i, 0, ms)} label={`Skip ${i + 1} from`} />
+              <span className="text-faint">to</span>
+              <TimeBox value={to} onChange={(ms) => ms !== null && setCut(i, 1, ms)} label={`Skip ${i + 1} to`} />
+              <button
+                onClick={() => void preview(Math.max(start, from - 2000))}
+                className="rounded px-1.5 py-0.5 font-medium text-accent hover:bg-accent/10"
+                title="Listen from two seconds before this skip, to hear how the join sounds"
+              >
+                Hear the join
+              </button>
               <button onClick={() => setCuts(cuts.filter((_, j) => j !== i))} aria-label={`Remove skip ${i + 1}`} className="ml-auto flex size-7 items-center justify-center rounded text-faint hover:bg-raised hover:text-ink">
                 <CloseIcon width={10} height={10} />
               </button>
@@ -142,27 +351,22 @@ export function TrimEditor({ asset, onClose }: { asset: Asset; onClose: () => vo
           ))}
         </div>
 
-        <p className="text-xs text-dim">
-          {live !== null ? `Playing now, at ${here}. ` : "Tip: play the sound and the current time can be filled in with one click. "}
-          {!invalid && duration > 0 && `Plays for ${formatTime(editedLength(duration, edit))} of ${formatTime(duration)}.`}
-          {invalid && <span className="text-danger">Check the times: each must be a time, and every “to” later than its “from”.</span>}
-        </p>
-
         <div className="flex items-center gap-2 border-t border-line pt-3">
           <button
             onClick={() => {
-              setStart("");
-              setEnd("");
+              setStart(0);
+              setEnd(null);
               setCuts([]);
             }}
-            className="mr-auto text-xs font-medium text-dim underline-offset-2 hover:text-ink hover:underline"
+            disabled={whole}
+            className="mr-auto text-xs font-medium text-dim underline-offset-2 hover:text-ink hover:underline disabled:opacity-40"
           >
             Play the whole file again
           </button>
-          <button onClick={() => void save(true)} disabled={invalid} className={buttonClass} title="Save and play it from its new start">
-            Save and listen
+          <button onClick={onClose} className={buttonClass}>
+            Cancel
           </button>
-          <button onClick={() => void save(false)} disabled={invalid} className={primaryClass}>
+          <button onClick={() => void save()} className={primaryClass}>
             Save
           </button>
         </div>

@@ -323,20 +323,24 @@ function Playing({ sound, color, fade }: { sound: SoundState; color: string; fad
   return (
     <div
       onDragOver={(e) => {
-        if (!takesSwap || !e.dataTransfer.types.includes(QUEUE_DRAG)) return;
+        const types = e.dataTransfer.types;
+        if (!takesSwap || (!types.includes(QUEUE_DRAG) && !types.includes(DRAG_TYPE))) return;
         e.preventDefault();
         e.stopPropagation();
-        e.dataTransfer.dropEffect = "move";
+        e.dataTransfer.dropEffect = types.includes(DRAG_TYPE) ? "copy" : "move";
         setSwap(true);
       }}
       onDragLeave={() => setSwap(false)}
       onDrop={(e) => {
         const id = Number(e.dataTransfer.getData(QUEUE_DRAG));
+        const assetId = Number(e.dataTransfer.getData(DRAG_TYPE));
         setSwap(false);
-        if (!takesSwap || !id) return;
+        if (!takesSwap || (!id && !assetId)) return;
         e.preventDefault();
         e.stopPropagation();
-        void api.swapWithPlaying(id);
+        if (id) void api.swapWithPlaying(id);
+        // From the library: play it now, in place of this track.
+        else void api.play(assetId, "music", { interrupt: true });
       }}
       className={`relative overflow-hidden rounded-md bg-raised ${sound.stopping ? "opacity-50" : ""} ${swap ? "ring-1 ring-accent" : ""}`}
     >
@@ -407,7 +411,7 @@ function Playing({ sound, color, fade }: { sound: SoundState; color: string; fad
           />
         )}
         <span className="shrink-0 text-[11px] tabular-nums text-dim">
-          {sound.stopping ? "Fading out" : swap ? "Drop to swap" : `${sound.paused ? "Paused · " : ""}${formatTime(drag !== null && duration ? drag * duration : sound.position_ms)} / ${formatTime(duration)}`}
+          {sound.stopping ? "Fading out" : swap ? "Drop to play now" : `${sound.paused ? "Paused · " : ""}${formatTime(drag !== null && duration ? drag * duration : sound.position_ms)} / ${formatTime(duration)}`}
         </span>
         {seekable && <PauseMenu sound={sound} fade={fade} />}
         {!sound.stopping && <LoopToggle id={sound.id} on={sound.looping} name={sound.name} />}
@@ -449,7 +453,12 @@ function Emitter({ emitter }: { emitter: EmitterState }) {
 
 function Queued({ item, index }: { item: QueuedState; index: number }) {
   const remove = useStore((s) => s.stopSound);
-  const [over, setOver] = useState(false);
+  /** Where a dragged sound would land: above this row, or below it. */
+  const [over, setOver] = useState<"above" | "below" | null>(null);
+  const half = (e: React.DragEvent<HTMLDivElement>) => {
+    const box = e.currentTarget.getBoundingClientRect();
+    return e.clientY < box.top + box.height / 2 ? "above" : "below";
+  };
   return (
     <div
       draggable
@@ -463,11 +472,13 @@ function Queued({ item, index }: { item: QueuedState; index: number }) {
         e.preventDefault();
         e.stopPropagation();
         e.dataTransfer.dropEffect = types.includes(DRAG_TYPE) ? "copy" : "move";
-        setOver(true);
+        setOver(half(e));
       }}
-      onDragLeave={() => setOver(false)}
+      onDragLeave={() => setOver(null)}
       onDrop={(e) => {
-        setOver(false);
+        setOver(null);
+        // The place in the queue as shown: before this row, or after it.
+        const place = index + (half(e) === "below" ? 1 : 0);
         const queued = Number(e.dataTransfer.getData(QUEUE_DRAG));
         const playing = Number(e.dataTransfer.getData(SOUND_DRAG + "music"));
         const assetId = Number(e.dataTransfer.getData(DRAG_TYPE));
@@ -475,16 +486,19 @@ function Queued({ item, index }: { item: QueuedState; index: number }) {
         e.preventDefault();
         e.stopPropagation();
         if (queued) {
-          if (queued !== item.id) void api.moveQueued(queued, index);
+          // Taking it out first shifts everything after it up by one.
+          const from = useStore.getState().engine?.channels.find((c) => c.channel === "music")?.queue.findIndex((q) => q.id === queued) ?? -1;
+          if (queued !== item.id) void api.moveQueued(queued, from >= 0 && from < place ? place - 1 : place);
         } else if (playing) {
-          void api.requeuePlaying(playing, index);
+          void api.requeuePlaying(playing, place);
         } else {
-          // From the library: add it, then put it in this place.
-          void api.play(assetId, "music").then((id) => api.moveQueued(id, index));
+          // From the library: add it at the end, then put it in this place.
+          void api.play(assetId, "music").then((id) => api.moveQueued(id, place));
         }
       }}
       title="Drag to change the order, onto the playing track to swap, or to another channel"
-      className={`flex h-7 cursor-grab items-center gap-1.5 rounded-md border pl-2.5 pr-1 active:cursor-grabbing ${over ? "border-accent bg-accent/10" : "border-line"}`}
+      style={over ? { boxShadow: `0 ${over === "above" ? "-3px" : "3px"} 0 -1px var(--color-accent)` } : undefined}
+      className="flex h-7 cursor-grab items-center gap-1.5 rounded-md border border-line pl-2.5 pr-1 active:cursor-grabbing"
     >
       <span className="min-w-0 flex-1 truncate text-xs text-dim">{item.name}</span>
       <span className="shrink-0 text-[11px] tabular-nums text-faint">{formatTime(item.duration_ms)}</span>

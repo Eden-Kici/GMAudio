@@ -207,6 +207,37 @@ struct PlayOptions {
     tag: Option<String>,
 }
 
+/// The outline of a sound, for the trim editor's timeline.
+#[tauri::command(async)]
+fn library_waveform(state: State<'_, AppState>, asset_id: i64, buckets: usize) -> CmdResult<Vec<f32>> {
+    let asset = state.library.asset(asset_id).ok_or("That sound is no longer in the library.")?;
+    gmaudio_core::analyze::waveform(Path::new(&asset.path), buckets, asset.duration_ms.unwrap_or(0)).map_err(msg)
+}
+
+/// Plays a sound once with a trim that has not been saved yet, from a
+/// chosen point, on the effects channel.
+#[tauri::command(async)]
+fn engine_preview(
+    state: State<'_, AppState>,
+    asset_id: i64,
+    edit: Option<gmaudio_core::model::AssetEdit>,
+    from_ms: Option<i64>,
+) -> CmdResult<u64> {
+    let duration = state.library.asset(asset_id).and_then(|a| a.duration_ms);
+    let edit = edit.and_then(|e| e.normalized(duration)).unwrap_or_default();
+    let request = PlayRequest {
+        looping: Some(false),
+        always_loop: false,
+        start_ms: edit.start_ms,
+        end_ms: edit.end_ms,
+        cuts: edit.cuts,
+        resume_ms: from_ms,
+        tag: Some("preview".into()),
+        ..project::play_request(&state.library, asset_id, Channel::Sfx).map_err(msg)?
+    };
+    state.engine.play(request).map_err(msg)
+}
+
 #[tauri::command(async)]
 fn engine_play(
     state: State<'_, AppState>,
@@ -822,6 +853,8 @@ pub fn run() {
             library_set_trim,
             engine_move_queued,
             engine_swap_with_playing,
+            library_waveform,
+            engine_preview,
             engine_move_to_channel,
             engine_requeue_playing,
             library_set_always_loop,

@@ -3,7 +3,7 @@
 An audio control center for running tabletop RPG sessions: music, ambience and
 sound effects from your own files, on one screen. Windows 10/11.
 
-Version 0.7.0 (shown at the bottom of Settings, and in `VERSION`).
+Version 0.8.0 (shown at the bottom of Settings, and in `VERSION`).
 
 Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 

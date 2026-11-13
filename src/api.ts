@@ -324,6 +324,10 @@ export const api = {
   requeuePlaying: (id: number, to: number) => invoke<void>("engine_requeue_playing", { id, to }),
   setAlwaysLoop: (assetId: number, on: boolean) => invoke<Asset>("library_set_always_loop", { assetId, on }),
   setEdit: (assetId: number, edit: AssetEdit | null) => invoke<Asset>("library_set_edit", { assetId, edit }),
+  waveform: (assetId: number, buckets: number) => invoke<number[]>("library_waveform", { assetId, buckets }),
+  /** Plays once on the effects channel with an unsaved trim, from `fromMs`. */
+  preview: (assetId: number, edit: AssetEdit | null, fromMs: number | null) =>
+    invoke<number>("engine_preview", { assetId, edit, fromMs }),
   swapWithPlaying: (id: number) => invoke<void>("engine_swap_with_playing", { id }),
   pauseSound: (id: number, paused: boolean, fadeMs: number) => invoke<void>("engine_pause", { id, paused, fadeMs }),
   youtubeImport: (url: string, channelTag: string | null) => invoke<Asset | null>("youtube_import", { url, channelTag }),
