@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { handleKey, preloadBoards, syncGlobalHotkeys } from "./actions";
 import { useDocs } from "./docs";
+import { useLayout } from "./layout";
 import { useStore } from "./store";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
@@ -48,6 +49,7 @@ export default function App() {
       else dispose = off;
     });
     void loadDocs().then(() => preloadBoards(useDocs.getState().boards));
+    void useLayout.getState().load();
     return () => {
       cancelled = true;
       dispose?.();

@@ -3,7 +3,7 @@
 An audio control center for running tabletop RPG sessions: music, ambience and
 sound effects from your own files, on one screen. Windows 10/11.
 
-Version 0.9.0 (shown at the bottom of Settings, and in `VERSION`).
+Version 0.9.1 (shown at the bottom of Settings, and in `VERSION`).
 
 Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 
@@ -20,6 +20,9 @@ Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
   plays. One tag: one click plays it there. Several: one button each.
   Right-click or drag onto a channel to play anywhere.
 - Split the library into up to four panes, each with its own search.
+- Drag the bars between panels to resize them: the library list, panes,
+  mixer height and channel widths, and the sections of the Play view.
+  Double-click a bar to reset it.
 - Tag many sounds at once: Ctrl+click, Shift+click or "Select all".
 - Find sounds online: search Freesound, listen, download into the library.
   Credits are kept with each sound.

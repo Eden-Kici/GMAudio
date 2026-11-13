@@ -100,6 +100,8 @@ export async function triggerPad(board: number, index: number, pad: Pad, phase: 
     const semitones = (Math.random() * 2 - 1) * pad.pitch_var;
     await api.play(pad.asset_ids[pick], pad.channel, {
       looping: pad.mode !== "oneshot",
+      // A music pad plays now, in place of whatever music is on.
+      interrupt: pad.channel === "music",
       trimDb: pad.volume_db - Math.random() * pad.volume_var,
       rate: Math.pow(2, semitones / 12),
       duck: pad.duck,

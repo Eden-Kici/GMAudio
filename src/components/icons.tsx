@@ -135,8 +135,11 @@ export const GridIcon = (p: SVGProps<SVGSVGElement>) => (
 
 export const GearIcon = (p: SVGProps<SVGSVGElement>) => (
   <svg {...base(p)}>
-    <circle cx="8" cy="8" r="2.2" />
-    <path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2" />
+    <circle cx="8" cy="8" r="2" />
+    <path
+      strokeLinejoin="round"
+      d="M6.9 1.6h2.2l.35 1.7 1.05.6 1.65-.55 1.1 1.9-1.3 1.15v1.2l1.3 1.15-1.1 1.9-1.65-.55-1.05.6-.35 1.7H6.9l-.35-1.7-1.05-.6-1.65.55-1.1-1.9 1.3-1.15V6.4l-1.3-1.15 1.1-1.9 1.65.55 1.05-.6.35-1.7Z"
+    />
   </svg>
 );
 
@@ -148,7 +151,7 @@ export const PencilIcon = (p: SVGProps<SVGSVGElement>) => (
 
 export const TrashIcon = (p: SVGProps<SVGSVGElement>) => (
   <svg {...base(p)}>
-    <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.5 8.5h6l.5-8.5" />
+    <path d="M2.8 4.5h10.4M6.3 4.5V2.8h3.4v1.7M4.2 4.5l.6 8.7h6.4l.6-8.7M6.7 7v3.8M9.3 7v3.8" />
   </svg>
 );
 

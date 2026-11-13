@@ -6,7 +6,8 @@ import { comboOf } from "../actions";
 import { assetName, useDocs } from "../docs";
 import { formatTime } from "../format";
 import { COLORS } from "../types";
-import { ArrowIcon, CloseIcon, PlusIcon, SearchIcon } from "./icons";
+import { useStore } from "../store";
+import { ArrowIcon, CloseIcon, PlayIcon, PlusIcon, SearchIcon, StopIcon, TrashIcon } from "./icons";
 
 export const buttonClass =
   "inline-flex h-9 items-center justify-center gap-2 rounded-md bg-raised px-3 text-sm font-medium text-ink hover:bg-line disabled:opacity-40";
@@ -189,6 +190,7 @@ export function AssetPicker({
   channel,
   chosen,
   onPick,
+  onRemove,
   onClose,
 }: {
   title: string;
@@ -196,9 +198,33 @@ export function AssetPicker({
   channel?: Channel;
   chosen: number[];
   onPick: (asset: Asset) => void;
+  /** Takes a chosen sound out again. Without it, chosen sounds only show as added. */
+  onRemove?: (asset: Asset) => void;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
+  /** The sound being listened to: its asset, and the engine's id for it. */
+  const [listening, setListening] = useState<{ asset: number; sound: number } | null>(null);
+  const stillSounding = useStore((s) => listening !== null && (s.engine?.sounds.some((x) => x.id === listening.sound && !x.stopping) ?? false));
+  const heard = useRef<number | null>(null);
+  heard.current = listening && stillSounding ? listening.sound : null;
+  // Closing the window ends the listening.
+  useEffect(
+    () => () => {
+      if (heard.current !== null) void api.stopSound(heard.current);
+    },
+    [],
+  );
+  const listen = async (asset: Asset) => {
+    const was = listening && stillSounding ? listening : null;
+    if (was) await api.stopSound(was.sound).catch(() => {});
+    if (was?.asset === asset.id) return setListening(null);
+    try {
+      setListening({ asset: asset.id, sound: await api.preview(asset.id, asset.edit, null) });
+    } catch (e) {
+      useStore.getState().notify(String(e));
+    }
+  };
   const [filter, setFilter] = useState<Channel | null>(channel ?? null);
   const [results, setResults] = useState<Asset[]>([]);
   const seq = useRef(0);
@@ -244,19 +270,45 @@ export function AssetPicker({
         {results.length === 0 && <p className="px-2 py-6 text-center text-sm text-dim">Nothing matches.</p>}
         {results.map((asset) => {
           const added = chosen.includes(asset.id);
+          const on = stillSounding && listening?.asset === asset.id;
+          const failed = asset.status === "failed";
           return (
-            <button
-              key={asset.id}
-              disabled={asset.status === "failed"}
-              onClick={() => onPick(asset)}
-              className="flex h-10 w-full items-center gap-3 rounded-md px-2.5 text-left hover:bg-raised disabled:opacity-40"
-            >
-              <span className="min-w-0 flex-1 truncate text-sm">{asset.name}</span>
-              <span className="text-xs tabular-nums text-faint">{formatTime(asset.duration_ms)}</span>
-              <span className={`flex w-16 items-center justify-end gap-1 text-xs font-medium ${added ? "text-accent" : "text-dim"}`}>
-                {added ? "Added" : <><PlusIcon width={12} height={12} /> Add</>}
-              </span>
-            </button>
+            <div key={asset.id} className={`flex h-10 items-center gap-1 rounded-md pl-1.5 hover:bg-raised ${failed ? "opacity-40" : ""}`}>
+              <button
+                disabled={failed}
+                onClick={() => void listen(asset)}
+                aria-label={on ? `Stop ${asset.name}` : `Listen to ${asset.name}`}
+                title={on ? "Stop" : "Listen without adding it (plays on the Sound effects channel)"}
+                className={`flex size-7 shrink-0 items-center justify-center rounded-full ${on ? "bg-accent text-bg" : "bg-raised text-ink hover:bg-line"}`}
+              >
+                {on ? <StopIcon width={10} height={10} /> : <PlayIcon width={10} height={10} />}
+              </button>
+              <button
+                disabled={failed}
+                onClick={() => (added && onRemove ? onRemove(asset) : onPick(asset))}
+                title={added && onRemove ? "Take it out again" : undefined}
+                className="group flex h-full min-w-0 flex-1 items-center gap-3 px-2 text-left"
+              >
+                <span className="min-w-0 flex-1 truncate text-sm">{asset.name}</span>
+                <span className="text-xs tabular-nums text-faint">{formatTime(asset.duration_ms)}</span>
+                <span className={`flex w-20 items-center justify-end gap-1 text-xs font-medium ${added ? "text-accent" : "text-dim"}`}>
+                  {!added ? (
+                    <>
+                      <PlusIcon width={12} height={12} /> Add
+                    </>
+                  ) : onRemove ? (
+                    <>
+                      <span className="group-hover:hidden">Added</span>
+                      <span className="hidden items-center gap-1 text-danger group-hover:flex">
+                        <CloseIcon width={10} height={10} /> Remove
+                      </span>
+                    </>
+                  ) : (
+                    "Added"
+                  )}
+                </span>
+              </button>
+            </div>
           );
         })}
       </div>
@@ -333,6 +385,7 @@ export function AssetList({
             useDocs.setState((s) => ({ assets: { ...s.assets, [asset.id]: asset } }));
             if (!ids.includes(asset.id)) onChange([...ids, asset.id]);
           }}
+          onRemove={(asset) => onChange(ids.filter((id) => id !== asset.id))}
           onClose={() => setPicking(false)}
         />
       )}
@@ -405,7 +458,8 @@ export function ConfirmButton({ label, confirm, onConfirm }: { label: string; co
   const [asking, setAsking] = useState(false);
   if (!asking) {
     return (
-      <button onClick={() => setAsking(true)} className="text-xs font-medium text-dim hover:text-danger">
+      <button onClick={() => setAsking(true)} className="flex items-center gap-1.5 text-xs font-medium text-dim hover:text-danger">
+        <TrashIcon width={13} height={13} />
         {label}
       </button>
     );
@@ -413,7 +467,8 @@ export function ConfirmButton({ label, confirm, onConfirm }: { label: string; co
   return (
     <span className="flex items-center gap-2 text-xs">
       <span className="text-dim">{confirm}</span>
-      <button onClick={onConfirm} className="rounded bg-danger px-2 py-1 font-medium text-white">
+      <button onClick={onConfirm} className="flex items-center gap-1 rounded bg-danger px-2 py-1 font-medium text-white">
+        <TrashIcon width={12} height={12} />
         Delete
       </button>
       <button onClick={() => setAsking(false)} className="rounded bg-line px-2 py-1 font-medium">

@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { CHANNELS, type Doc } from "../api";
 import { DEFAULT_PAD_KEYS, padTag, preloadBoards, setHotkey, setVisibleBoard, triggerPad } from "../actions";
 import { useDocs, useScoped } from "../docs";
+import { useLayout } from "../layout";
 import { MoreOptions, ScopeField } from "./Campaigns";
 import { useStore } from "../store";
 import { newBoard, newPad, type Board, type Pad } from "../types";
-import { CloseIcon, LoopIcon, PencilIcon, PlusIcon } from "./icons";
+import { CloseIcon, LoopIcon, PencilIcon, PlusIcon, SplitIcon } from "./icons";
+import { Split } from "./Resize";
 import {
   AssetList,
   buttonClass,
@@ -91,51 +93,183 @@ export function PadGrid({ board, editing, onEdit }: { board: Doc<Board>; editing
   );
 }
 
-export function BoardsView() {
-  const boards = useScoped("boards");
-  const campaignId = useDocs((s) => s.campaignId);
+const MAX_BOARD_PANES = 4;
+
+/**
+ * One or more boards side by side, each pane showing a board of its own
+ * choosing. Which boards are open is remembered under `id`.
+ */
+export function BoardPanes({
+  id,
+  boards,
+  editing,
+  onEditPad,
+  onCreate,
+  front,
+}: {
+  id: string;
+  boards: Doc<Board>[];
+  editing?: boolean;
+  onEditPad?: (board: number, pad: number | null) => void;
+  /** Makes a new board and returns its id. Shown as "+" when given. */
+  onCreate?: () => Promise<number>;
+  /** A board to bring to the first pane, e.g. the playing scene's own. */
+  front?: number | null;
+}) {
   const save = useDocs((s) => s.save);
   const remove = useDocs((s) => s.remove);
-  const [selected, setSelected] = useState<number | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [pad, setPad] = useState<number | null>(null);
-  const board = boards.find((b) => b.id === selected) ?? boards[0];
+  const saved = useLayout((s) => s.sizes[`pads:${id}`]);
+  const setSaved = useLayout((s) => s.set);
+  const open = saved && saved.length > 0 ? saved.slice(0, MAX_BOARD_PANES) : [boards[0]?.id ?? 0];
+  const setOpen = (next: number[]) => setSaved(`pads:${id}`, next);
+  const [active, setActive] = useState(0);
+  const shown = open.map((boardId) => boards.find((b) => b.id === boardId) ?? boards[0]);
 
   useEffect(() => {
-    setVisibleBoard(board ?? null);
+    if (front != null && open[0] !== front) setOpen([front, ...open.slice(1)]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [front]);
+  // The number keys play the pads of the pane last touched.
+  const keyed = shown[Math.min(active, shown.length - 1)];
+  useEffect(() => {
+    setVisibleBoard(keyed ?? null);
     return () => setVisibleBoard(null);
-  }, [board]);
-  useEffect(() => preloadBoards(boards), [boards]);
+  }, [keyed]);
 
-  const create = async () => {
-    const id = await save("board", null, { ...newBoard(`Board ${boards.length + 1}`), campaign_id: campaignId });
-    setSelected(id);
-    setEditing(true);
+  const choose = (pane: number, boardId: number) => {
+    setOpen(open.map((b, i) => (i === pane ? boardId : b)));
+    onEditPad?.(boardId, null);
   };
 
   return (
-    <main className="flex min-h-0 min-w-0 flex-1">
-      <div className="min-w-0 flex-1 overflow-y-auto p-5">
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <h1 className="mr-2 text-lg font-semibold">Soundboard</h1>
-          <div className="mr-auto flex flex-wrap gap-1">
+    <Split id={`pads-${id}`} min={220} className="min-h-0 flex-1">
+      {shown.map((board, pane) => (
+        <section
+          key={pane}
+          aria-label="Soundboard"
+          onPointerDownCapture={() => setActive(pane)}
+          className={`flex min-h-0 flex-1 flex-col ${shown.length > 1 && pane === Math.min(active, shown.length - 1) ? "shadow-[inset_0_2px_0_var(--color-accent)]" : ""}`}
+        >
+          <div className="flex flex-wrap items-center gap-1 px-4 pb-2 pt-3">
             {boards.map((b) => (
               <button
                 key={b.id}
-                onClick={() => {
-                  setSelected(b.id);
-                  setPad(null);
-                }}
-                className={`h-8 rounded-md px-3 text-sm font-medium ${b.id === board?.id ? "bg-raised text-ink" : "text-dim hover:text-ink"}`}
+                onClick={() => choose(pane, b.id)}
+                className={`h-7 rounded-md px-2.5 text-xs font-medium ${b.id === board?.id ? "bg-raised text-ink" : "text-dim hover:text-ink"}`}
               >
                 {b.data.name || "Untitled"}
               </button>
             ))}
-            <button onClick={() => void create()} title="New board" aria-label="New board" className="flex size-8 items-center justify-center rounded-md text-dim hover:bg-raised hover:text-ink">
-              <PlusIcon />
-            </button>
+            {onCreate && (
+              <button
+                onClick={() => void onCreate().then((made) => choose(pane, made))}
+                title="New board"
+                aria-label="New board"
+                className="flex size-7 items-center justify-center rounded-md text-dim hover:bg-raised hover:text-ink"
+              >
+                <PlusIcon />
+              </button>
+            )}
+            <span className="ml-auto flex items-center gap-0.5">
+              {open.length < MAX_BOARD_PANES && boards.length > 0 && (
+                <button
+                  onClick={() => setOpen([...open.slice(0, pane + 1), boards.find((b) => !open.includes(b.id))?.id ?? board?.id ?? 0, ...open.slice(pane + 1)])}
+                  title="Show another board beside this one"
+                  aria-label="Split"
+                  className="flex size-7 items-center justify-center rounded-md text-dim hover:bg-raised hover:text-ink"
+                >
+                  <SplitIcon />
+                </button>
+              )}
+              {open.length > 1 && (
+                <button
+                  onClick={() => setOpen(open.filter((_, i) => i !== pane))}
+                  title="Close this pane"
+                  aria-label="Close pane"
+                  className="flex size-7 items-center justify-center rounded-md text-dim hover:bg-raised hover:text-ink"
+                >
+                  <CloseIcon width={12} height={12} />
+                </button>
+              )}
+            </span>
           </div>
-          {board && (
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+            {!board ? (
+              <p className="text-sm text-dim">No boards yet.</p>
+            ) : (
+              <>
+                {editing && (
+                  <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg bg-panel p-3">
+                    <input
+                      value={board.data.name}
+                      onChange={(e) => void save("board", board.id, { ...board.data, name: e.target.value })}
+                      placeholder="Board name"
+                      aria-label="Board name"
+                      className={`${inputBase} h-9 w-48`}
+                    />
+                    <label className="flex items-center gap-2 text-xs text-dim">
+                      Pads per row
+                      <select
+                        value={board.data.columns}
+                        onChange={(e) => void save("board", board.id, { ...board.data, columns: Number(e.target.value) })}
+                        className={`${inputBase} h-9 w-16`}
+                      >
+                        {[2, 3, 4, 5, 6, 8].map((n) => (
+                          <option key={n}>{n}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="w-64">
+                      <ScopeField value={board.data} onChange={(scope) => void save("board", board.id, { ...board.data, ...scope })} />
+                    </div>
+                    <span className="ml-auto">
+                      <ConfirmButton
+                        label="Delete board"
+                        confirm="Delete this board and its pads?"
+                        onConfirm={() => {
+                          onEditPad?.(board.id, null);
+                          void remove("board", board.id);
+                        }}
+                      />
+                    </span>
+                  </div>
+                )}
+                <PadGrid board={board} editing={editing} onEdit={onEditPad ? (index) => onEditPad(board.id, index) : undefined} />
+                {!editing && board.data.pads.length === 0 && (
+                  <p className="mt-6 text-center text-sm text-dim">This board is empty.{onEditPad ? " Choose “Edit pads” to add some." : ""}</p>
+                )}
+              </>
+            )}
+          </div>
+        </section>
+      ))}
+    </Split>
+  );
+}
+
+export function BoardsView() {
+  const boards = useScoped("boards");
+  const campaignId = useDocs((s) => s.campaignId);
+  const save = useDocs((s) => s.save);
+  const [editing, setEditing] = useState(false);
+  /** The pad open in the editor: which board, and which pad on it. */
+  const [pad, setPad] = useState<{ board: number; index: number } | null>(null);
+  const edited = pad ? boards.find((b) => b.id === pad.board) : undefined;
+
+  useEffect(() => preloadBoards(boards), [boards]);
+
+  const create = async () => {
+    const id = await save("board", null, { ...newBoard(`Board ${boards.length + 1}`), campaign_id: campaignId });
+    setEditing(true);
+    return id;
+  };
+
+  return (
+    <main className="flex min-h-0 min-w-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex flex-wrap items-center gap-2 px-5 pt-5">
+          <h1 className="mr-auto text-lg font-semibold">Soundboard</h1>
+          {boards.length > 0 && (
             <button
               onClick={() => {
                 setEditing(!editing);
@@ -149,7 +283,7 @@ export function BoardsView() {
           )}
         </div>
 
-        {!board ? (
+        {boards.length === 0 ? (
           <div className="mx-auto mt-16 max-w-md text-center text-dim">
             <p className="text-[15px] text-ink">Sound effects at your fingertips</p>
             <p className="mt-2 text-sm leading-relaxed">
@@ -161,60 +295,21 @@ export function BoardsView() {
             </button>
           </div>
         ) : (
-          <>
-            {editing && (
-              <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg bg-panel p-3">
-                <input
-                  value={board.data.name}
-                  onChange={(e) => void save("board", board.id, { ...board.data, name: e.target.value })}
-                  placeholder="Board name"
-                  aria-label="Board name"
-                  className={`${inputBase} h-9 w-56`}
-                />
-                <label className="flex items-center gap-2 text-xs text-dim">
-                  Pads per row
-                  <select
-                    value={board.data.columns}
-                    onChange={(e) => void save("board", board.id, { ...board.data, columns: Number(e.target.value) })}
-                    className={`${inputBase} h-9 w-16`}
-                  >
-                    {[3, 4, 5, 6, 8].map((n) => (
-                      <option key={n}>{n}</option>
-                    ))}
-                  </select>
-                </label>
-                <div className="w-72">
-                  <ScopeField value={board.data} onChange={(scope) => void save("board", board.id, { ...board.data, ...scope })} />
-                </div>
-                <span className="ml-auto">
-                  <ConfirmButton
-                    label="Delete board"
-                    confirm="Delete this board and its pads?"
-                    onConfirm={() => {
-                      void remove("board", board.id);
-                      setSelected(null);
-                      setEditing(false);
-                    }}
-                  />
-                </span>
-              </div>
-            )}
-            <PadGrid
-              board={board}
-              editing={editing}
-              onEdit={(index) => {
-                setEditing(true);
-                setPad(index);
-              }}
-            />
-            {!editing && board.data.pads.length === 0 && (
-              <p className="mt-6 text-center text-sm text-dim">This board is empty. Choose “Edit pads” to add some.</p>
-            )}
-          </>
+          <BoardPanes
+            id="prep"
+            boards={boards}
+            editing={editing}
+            onCreate={create}
+            onEditPad={(board, index) => {
+              if (index === null) return setPad(null);
+              setEditing(true);
+              setPad({ board, index });
+            }}
+          />
         )}
       </div>
-      {board && editing && pad !== null && board.data.pads[pad] && (
-        <PadEditor key={`${board.id}-${pad}`} board={board} index={pad} onClose={() => setPad(null)} />
+      {edited && editing && pad && edited.data.pads[pad.index] && (
+        <PadEditor key={`${edited.id}-${pad.index}`} board={edited} index={pad.index} onClose={() => setPad(null)} />
       )}
     </main>
   );
@@ -268,15 +363,12 @@ function PadEditor({ board, index, onClose }: { board: Doc<Board>; index: number
           <Slider value={pad.volume_db} min={-30} max={6} onChange={(volume_db) => set({ volume_db })} format={formatDb} label="Pad volume" />
         </Field>
 
+        <Field label="Plays on" hint={pad.channel === "music" ? "Replaces the music that is playing" : "Which mixer channel carries it"}>
+          <Segmented value={pad.channel} onChange={(channel) => set({ channel })} options={CHANNELS.map((c) => ({ value: c.id, label: c.label }))} />
+        </Field>
+
         {advanced && (
           <>
-            <Field label="Plays on" hint="Which mixer channel carries it">
-              <Segmented
-                value={pad.channel}
-                onChange={(channel) => set({ channel })}
-                options={CHANNELS.filter((c) => c.id !== "music").map((c) => ({ value: c.id, label: c.label }))}
-              />
-            </Field>
             <Toggle on={pad.duck} onChange={(duck) => set({ duck })} label="Lower the music while this plays" />
             <Field label="Variation" hint="So repeated presses do not sound identical">
               <Slider

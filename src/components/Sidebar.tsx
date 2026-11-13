@@ -4,7 +4,9 @@ import type { Folder } from "../api";
 import { folderName, plural } from "../format";
 import { useStore } from "../store";
 import { CloseIcon, FolderIcon, PlusIcon, RefreshIcon, SearchIcon, WarningIcon } from "./icons";
+import { useSizes } from "../layout";
 import { OnlineSounds } from "./Online";
+import { Divider } from "./Resize";
 import { YouTubeImport } from "./YouTube";
 
 export async function pickFolder(): Promise<string | null> {
@@ -23,6 +25,7 @@ export function Sidebar() {
   const setFilter = (id: number | null) => setPaneFolder(activePane, id);
   const hasStarter = folders.some((f) => /[\\/]Starter Sounds$/i.test(f.path));
   const [online, setOnline] = useState(false);
+  const [[width], setWidth] = useSizes("sidebar", [256]);
   const [youtube, setYoutube] = useState(false);
 
   const add = async () => {
@@ -31,7 +34,8 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-panel">
+    <>
+    <aside className="flex shrink-0 flex-col bg-panel" style={{ width }}>
       <div className="flex items-center justify-between px-4 pb-2 pt-4">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-dim">Library</h2>
       </div>
@@ -89,6 +93,8 @@ export function Sidebar() {
         </p>
       </div>
     </aside>
+    <Divider direction="x" onDrag={(d) => setWidth([Math.min(520, Math.max(180, width + d))])} onReset={() => setWidth([256])} label="Library list width" />
+    </>
   );
 }
 

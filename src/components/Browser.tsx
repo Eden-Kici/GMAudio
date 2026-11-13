@@ -4,6 +4,7 @@ import { useDocs } from "../docs";
 import { folderName, formatTime, plural, relativeFolder } from "../format";
 import { MAX_PANES, playingKey, RESULT_LIMIT, useStore, type Pane } from "../store";
 import { CheckIcon, ChevronIcon, CloseIcon, FolderIcon, PlayIcon, PlusIcon, SearchIcon, SplitIcon, WarningIcon } from "./icons";
+import { Split } from "./Resize";
 import { pickFolder } from "./Sidebar";
 import { editedLength, TrimEditor } from "./TrimEditor";
 import { formatDb, inputBase, Slider } from "./ui";
@@ -19,14 +20,18 @@ export function Browser() {
 
   if (foldersLoaded && folders.length === 0) return <Welcome />;
 
-  const grid = panes.length === 4 ? "grid-cols-2 grid-rows-2" : panes.length === 3 ? "grid-cols-3" : panes.length === 2 ? "grid-cols-2" : "grid-cols-1";
+  const view = (pane: Pane) => <PaneView key={pane.id} pane={pane} canSplit={panes.length < MAX_PANES} canClose={panes.length > 1} />;
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className={`grid min-h-0 flex-1 gap-px bg-line ${grid}`}>
-        {panes.map((pane) => (
-          <PaneView key={pane.id} pane={pane} canSplit={panes.length < MAX_PANES} canClose={panes.length > 1} />
-        ))}
-      </div>
+      {panes.length === 4 ? (
+        // Two rows of two, each bar draggable.
+        <Split id="library-rows" direction="y" min={140} className="flex-1">
+          <Split id="library-top" className="flex-1">{panes.slice(0, 2).map(view)}</Split>
+          <Split id="library-bottom" className="flex-1">{panes.slice(2).map(view)}</Split>
+        </Split>
+      ) : (
+        <Split id="library" className="flex-1">{panes.map(view)}</Split>
+      )}
       <BulkBar />
     </main>
   );
@@ -62,7 +67,7 @@ function PaneView({ pane, canSplit, canClose }: { pane: Pane; canSplit: boolean;
 
   return (
     <section
-      className={`flex min-h-0 min-w-0 flex-col bg-bg ${active ? "shadow-[inset_0_2px_0_var(--color-accent)]" : ""}`}
+      className={`flex min-h-0 min-w-0 flex-1 flex-col bg-bg ${active ? "shadow-[inset_0_2px_0_var(--color-accent)]" : ""}`}
       onPointerDownCapture={() => setActivePane(pane.id)}
       onFocusCapture={() => setActivePane(pane.id)}
       aria-label="Library pane"

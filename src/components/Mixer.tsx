@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, CHANNELS, type Channel, type ChannelState, type EmitterState, type QueuedState, type SoundState } from "../api";
 import { useDocs } from "../docs";
+import { useSizes } from "../layout";
+import { Divider, Split } from "./Resize";
 import { SetPanel } from "./SetsView";
 import { formatTime } from "../format";
 import { useStore } from "../store";
@@ -20,8 +22,17 @@ export function Mixer() {
   const sounds = useStore((s) => s.engine?.sounds);
   const emitters = useStore((s) => s.engine?.emitters);
 
+  const [[height], setHeight] = useSizes("mixer-height", [240]);
   return (
-    <section aria-label="Mixer" className="grid h-60 shrink-0 grid-cols-4 grid-rows-[minmax(0,1fr)] gap-px border-t border-line bg-line">
+    <>
+    <Divider
+      direction="y"
+      onDrag={(d) => setHeight([Math.min(Math.round(window.innerHeight * 0.7), Math.max(130, height - d))])}
+      onReset={() => setHeight([240])}
+      label="Mixer height"
+    />
+    <section aria-label="Mixer" className="flex shrink-0 flex-col" style={{ height }}>
+      <Split id="mixer" min={170} className="flex-1">
       {CHANNELS.map((c) => (
         <Strip
           key={c.id}
@@ -35,7 +46,9 @@ export function Mixer() {
           index={CHANNELS.indexOf(c)}
         />
       ))}
+      </Split>
     </section>
+    </>
   );
 }
 
@@ -82,7 +95,7 @@ function Strip({ id, label, hint, color, state, sounds, emitters, index }: Strip
 
   return (
     <div
-      className={`relative flex min-h-0 min-w-0 flex-col bg-panel px-4 pb-3 pt-3 ${dragging ? "transition-shadow" : ""}`}
+      className={`relative flex min-h-0 min-w-0 flex-1 flex-col bg-panel px-4 pb-3 pt-3 ${dragging ? "transition-shadow" : ""}`}
       style={over ? { boxShadow: `inset 0 0 0 2px ${color}` } : undefined}
       onDragOver={(e) => {
         const types = e.dataTransfer.types;

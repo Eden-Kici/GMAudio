@@ -148,8 +148,8 @@ export function CuesView() {
                   } ${cue.state ? "opacity-55" : ""}`}
                 >
                   <button
-                    onClick={(e) => (e.shiftKey ? fireCue(at) : jumpToCue(at))}
-                    title="Click: make this the next cue. Shift+click: fire it now without moving."
+                    onClick={(e) => (isNext ? go() : e.shiftKey ? fireCue(at) : jumpToCue(at))}
+                    title={isNext ? "Fire this cue and move to the next (Space)" : "Click: make this the next cue. Shift+click: fire it now without moving."}
                     className={`flex size-8 shrink-0 items-center justify-center rounded-md text-xs font-semibold tabular-nums ${
                       isNext ? "bg-accent text-bg" : "bg-raised text-dim hover:text-ink"
                     }`}

@@ -355,9 +355,14 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
             onClose();
           }}
         />
-        <button onClick={() => void activateScene({ id: scene.id, data })} className={primaryClass}>
-          Try it
-        </button>
+        <span className="flex items-center gap-2">
+          <button onClick={() => void activateScene({ id: scene.id, data })} className={buttonClass} title="Switch to this scene now, to hear it">
+            Try it
+          </button>
+          <button onClick={onClose} className={primaryClass} title="Changes are kept as you make them; this closes the editor">
+            Save
+          </button>
+        </span>
       </div>
 
       {addingLayer && (
@@ -369,6 +374,7 @@ function SceneEditor({ scene, onClose }: { scene: Doc<Scene>; onClose: () => voi
             useDocs.setState((s) => ({ assets: { ...s.assets, [asset.id]: asset } }));
             if (!data.layers.some((l) => l.asset_id === asset.id)) set({ layers: [...data.layers, { asset_id: asset.id, volume_db: 0 }] });
           }}
+          onRemove={(asset) => set({ layers: data.layers.filter((l) => l.asset_id !== asset.id) })}
           onClose={() => setAddingLayer(false)}
         />
       )}
