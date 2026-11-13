@@ -324,6 +324,9 @@ export const api = {
   requeuePlaying: (id: number, to: number) => invoke<void>("engine_requeue_playing", { id, to }),
   setAlwaysLoop: (assetId: number, on: boolean) => invoke<Asset>("library_set_always_loop", { assetId, on }),
   setEdit: (assetId: number, edit: AssetEdit | null) => invoke<Asset>("library_set_edit", { assetId, edit }),
+  /** [start, end] of the audible part in ms; end is null at the end of the file. */
+  audiblePart: (assetId: number) => invoke<[number, number | null]>("library_audible_part", { assetId }),
+  trimSilence: (assetIds: number[]) => invoke<number>("library_trim_silence", { assetIds }),
   waveform: (assetId: number, buckets: number) => invoke<number[]>("library_waveform", { assetId, buckets }),
   /** Plays once on the effects channel with an unsaved trim, from `fromMs`. */
   preview: (assetId: number, edit: AssetEdit | null, fromMs: number | null) =>

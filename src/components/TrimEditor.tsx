@@ -56,7 +56,9 @@ function TimeBox({ value, onChange, placeholder, label }: { value: number | null
   );
 }
 
-type Grip = { kind: "start" } | { kind: "end" } | { kind: "cut"; index: number; edge: 0 | 1 };
+type Grip = { kind: "start" } | { kind: "end" } | { kind: "cut"; index: number; edge: 0 | 1 } | { kind: "playhead" };
+
+const MAX_ZOOM = 64;
 
 /** The sound drawn out, with the kept and skipped parts marked and handles to drag. */
 function Timeline({
@@ -69,7 +71,9 @@ function Timeline({
   onStart,
   onEnd,
   onCut,
+  onScrub,
   onSeek,
+  following,
 }: {
   peaks: number[] | null;
   duration: number;
@@ -80,10 +84,61 @@ function Timeline({
   onStart: (ms: number) => void;
   onEnd: (ms: number) => void;
   onCut: (index: number, edge: 0 | 1, ms: number) => void;
+  /** The play marker is being dragged to `ms`. */
+  onScrub: (ms: number) => void;
+  /** The play marker was let go at `ms`: listen from there. */
   onSeek: (ms: number) => void;
+  /** A preview is playing, so keep the play marker in view. */
+  following: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
   const [grip, setGrip] = useState<Grip | null>(null);
+  const [zoom, setZoom] = useState(1);
+  /** Redraws the time labels when the picture is scrolled sideways. */
+  const [, setScrolled] = useState(0);
+  /** The time to keep under the pointer when the zoom changes, and where the pointer is. */
+  const anchor = useRef<{ ms: number; x: number } | null>(null);
+  const zoomTo = (next: number, around?: { ms: number; x: number }) => {
+    const view = scroller.current;
+    if (!view) return;
+    const to = Math.min(MAX_ZOOM, Math.max(1, next));
+    // Without a pointer, zoom around the middle of what is showing.
+    const middle = view.clientWidth / 2;
+    anchor.current = around ?? { ms: ((view.scrollLeft + middle) / (view.clientWidth * zoom)) * duration, x: middle };
+    setZoom(to);
+  };
+  useEffect(() => {
+    const view = scroller.current;
+    if (!view || !anchor.current) return;
+    view.scrollLeft = (anchor.current.ms / duration) * view.clientWidth * zoom - anchor.current.x;
+    anchor.current = null;
+  }, [zoom, duration]);
+  // The mouse wheel zooms in and out around the pointer.
+  const zoomNow = useRef(zoom);
+  zoomNow.current = zoom;
+  useEffect(() => {
+    const view = scroller.current;
+    if (!view) return;
+    const wheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) return; // sideways: scroll
+      e.preventDefault();
+      const r = view.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const ms = ((view.scrollLeft + x) / (view.clientWidth * zoomNow.current)) * duration;
+      zoomTo(zoomNow.current * (e.deltaY < 0 ? 1.5 : 1 / 1.5), { ms, x });
+    };
+    view.addEventListener("wheel", wheel, { passive: false });
+    return () => view.removeEventListener("wheel", wheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [duration]);
+  // While a preview plays, keep the play marker on screen.
+  useEffect(() => {
+    const view = scroller.current;
+    if (!view || !following || playhead === null || grip) return;
+    const x = (playhead / duration) * view.clientWidth * zoom;
+    if (x < view.scrollLeft || x > view.scrollLeft + view.clientWidth - 24) view.scrollLeft = Math.max(0, x - 40);
+  }, [playhead, following, zoom, duration, grip]);
   const pct = (ms: number) => `${(Math.min(duration, Math.max(0, ms)) / duration) * 100}%`;
   const at = (clientX: number) => {
     const r = box.current!.getBoundingClientRect();
@@ -105,18 +160,24 @@ function Timeline({
 
   // While a handle is held, follow the pointer anywhere in the window. The
   // latest values are read through a ref, so the listeners are set up once per drag.
-  const latest = useRef({ start, end, onStart, onEnd, onCut });
-  latest.current = { start, end, onStart, onEnd, onCut };
+  const latest = useRef({ start, end, onStart, onEnd, onCut, onScrub, onSeek });
+  latest.current = { start, end, onStart, onEnd, onCut, onScrub, onSeek };
+  const held = useRef(0);
   useEffect(() => {
     if (!grip) return;
     const move = (e: PointerEvent) => {
       const now = latest.current;
       const ms = at(e.clientX);
+      held.current = ms;
       if (grip.kind === "start") now.onStart(Math.min(ms, now.end - 200));
       else if (grip.kind === "end") now.onEnd(Math.max(ms, now.start + 200));
-      else now.onCut(grip.index, grip.edge, ms);
+      else if (grip.kind === "cut") now.onCut(grip.index, grip.edge, ms);
+      else now.onScrub(ms);
     };
-    const drop = () => setGrip(null);
+    const drop = () => {
+      if (grip.kind === "playhead") latest.current.onSeek(held.current);
+      setGrip(null);
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", drop);
     window.addEventListener("pointercancel", drop);
@@ -151,7 +212,7 @@ function Timeline({
         const to = ms + step * (e.shiftKey ? 10 : 1);
         if (g.kind === "start") onStart(Math.min(Math.max(0, to), end - 200));
         else if (g.kind === "end") onEnd(Math.max(Math.min(duration, to), start + 200));
-        else onCut(g.index, g.edge, to);
+        else if (g.kind === "cut") onCut(g.index, g.edge, to);
       }}
       style={{ left: pct(ms) }}
       className="absolute inset-y-0 z-20 -ml-2 w-4 cursor-ew-resize touch-none"
@@ -161,13 +222,37 @@ function Timeline({
     </div>
   );
 
+  const zoomButton = "flex size-6 items-center justify-center rounded bg-raised text-sm font-medium leading-none hover:bg-line disabled:opacity-40";
+  const shownFrom = scroller.current ? (scroller.current.scrollLeft / (scroller.current.clientWidth * zoom)) * duration : 0;
   return (
     <div>
+      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-faint">
+        <button onClick={() => zoomTo(zoom / 2)} disabled={zoom <= 1} aria-label="Zoom out" title="Zoom out" className={zoomButton}>
+          −
+        </button>
+        <button onClick={() => zoomTo(zoom * 2)} disabled={zoom >= MAX_ZOOM} aria-label="Zoom in" title="Zoom in" className={zoomButton}>
+          +
+        </button>
+        <button onClick={() => zoomTo(1)} disabled={zoom === 1} className="rounded bg-raised px-2 py-1 font-medium hover:bg-line disabled:opacity-40">
+          Show all
+        </button>
+        <span className="ml-1">
+          {zoom > 1 ? `Zoomed ${zoom >= 10 ? Math.round(zoom) : Math.round(zoom * 10) / 10}×. ` : ""}
+          Scroll the mouse wheel over the picture to zoom; Shift + wheel moves sideways.
+        </span>
+      </div>
+      <div ref={scroller} className="overflow-x-auto overflow-y-hidden rounded-lg bg-bg" onScroll={() => setScrolled((n) => n + 1)}>
       <div
         ref={box}
-        onPointerDown={(e) => onSeek(at(e.clientX))}
-        title="Click to listen from that point"
-        className="relative h-28 cursor-pointer select-none overflow-hidden rounded-lg bg-bg"
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          held.current = at(e.clientX);
+          onScrub(held.current);
+          setGrip({ kind: "playhead" });
+        }}
+        style={{ width: `${zoom * 100}%` }}
+        className="relative h-28 cursor-pointer select-none overflow-hidden"
       >
         <svg viewBox="0 0 1000 100" preserveAspectRatio="none" className="absolute inset-0 size-full text-dim">
           {shape ? <path d={shape} fill="currentColor" /> : <line x1="0" y1="50" x2="1000" y2="50" stroke="currentColor" strokeWidth="1" />}
@@ -183,7 +268,12 @@ function Timeline({
             style={{ left: pct(from), width: `${(Math.max(0, to - from) / duration) * 100}%` }}
           />
         ))}
-        {playhead !== null && <span className="absolute inset-y-0 z-10 w-px bg-ink" style={{ left: pct(playhead) }} />}
+        {playhead !== null && (
+          <span className="pointer-events-none absolute inset-y-0 z-10 -ml-1.5 w-3" style={{ left: pct(playhead) }}>
+            <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-ink" />
+            <span className="absolute left-1/2 top-0 size-0 -translate-x-1/2 border-x-[6px] border-t-[8px] border-x-transparent border-t-ink" />
+          </span>
+        )}
         {handle({ kind: "start" }, start, "var(--color-accent)", "Start")}
         {handle({ kind: "end" }, end, "var(--color-accent)", "End")}
         {cuts.flatMap(([from, to], i) => [
@@ -191,10 +281,11 @@ function Timeline({
           handle({ kind: "cut", index: i, edge: 1 }, to, "var(--color-danger)", `Skip ${i + 1} to`),
         ])}
       </div>
+      </div>
       <div className="mt-1 flex justify-between text-[11px] tabular-nums text-faint">
-        <span>0:00</span>
-        <span>{formatTime(duration / 2)}</span>
-        <span>{formatTime(duration)}</span>
+        <span>{formatExact(shownFrom)}</span>
+        <span>{formatExact(shownFrom + duration / zoom / 2)}</span>
+        <span>{formatExact(Math.min(duration, shownFrom + duration / zoom))}</span>
       </div>
     </div>
   );
@@ -212,11 +303,15 @@ export function TrimEditor({ asset, onClose }: { asset: Asset; onClose: () => vo
   /** Where the last click on the timeline was. */
   const [cursor, setCursor] = useState<number | null>(null);
   const previewing = useStore((s) => (previewId === null ? null : (s.engine?.sounds.find((x) => x.id === previewId && !x.stopping) ?? null)));
-  const playhead = previewing ? previewing.position_ms : cursor;
+  /** The play marker is being dragged. */
+  const [scrubbing, setScrubbing] = useState(false);
+  const playhead = !scrubbing && previewing ? previewing.position_ms : cursor;
+  const [resetting, setResetting] = useState(false);
+  const [finding, setFinding] = useState(false);
 
   useEffect(() => {
     void api
-      .waveform(asset.id, 600)
+      .waveform(asset.id, 3000)
       .then(setPeaks)
       .catch(() => setPeaks([]));
   }, [asset.id]);
@@ -260,6 +355,21 @@ export function TrimEditor({ asset, onClose }: { asset: Asset; onClose: () => vo
     const from = Math.min(Math.max(playhead ?? start + (last - start) / 2, start), last - 200);
     setCuts([...cuts, [Math.round(from), Math.round(Math.min(last, from + Math.max(500, duration / 10)))]]);
   };
+  /** Sets the start and end to where the sound becomes audible and where it dies away. */
+  const trimSilence = async () => {
+    setFinding(true);
+    try {
+      const [from, to] = await api.audiblePart(asset.id);
+      if (from === 0 && to === null) useStore.getState().notify("No silence found at the start or the end.", "info");
+      setStart(from);
+      setEnd(to);
+      // Skips that now fall outside the kept part no longer mean anything.
+      setCuts((list) => list.filter(([a, b]) => b > from && a < (to ?? duration)));
+    } catch (e) {
+      fail(e);
+    }
+    setFinding(false);
+  };
   const save = async () => {
     try {
       await stopPreview();
@@ -276,8 +386,8 @@ export function TrimEditor({ asset, onClose }: { asset: Asset; onClose: () => vo
     <Modal title={`Trim “${asset.name}”`} onClose={onClose} wide>
       <div className="space-y-4 overflow-y-auto p-4">
         <p className="text-xs leading-relaxed text-faint">
-          Drag the orange handles to set where the sound starts and ends. Red parts are skipped. Click anywhere on the
-          picture to listen from there. The file on disk is not changed.
+          Drag the orange handles to set where the sound starts and ends. Red parts are skipped. Click or drag on the
+          picture to move the play marker and listen from there. The file on disk is not changed.
         </p>
 
         <Timeline
@@ -290,10 +400,16 @@ export function TrimEditor({ asset, onClose }: { asset: Asset; onClose: () => vo
           onStart={(ms) => setStart(Math.max(0, ms))}
           onEnd={(ms) => setEnd(ms >= duration ? null : ms)}
           onCut={setCut}
+          onScrub={(ms) => {
+            setScrubbing(true);
+            setCursor(ms);
+          }}
           onSeek={(ms) => {
+            setScrubbing(false);
             setCursor(ms);
             void preview(ms);
           }}
+          following={previewing !== null && !scrubbing}
         />
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -304,6 +420,14 @@ export function TrimEditor({ asset, onClose }: { asset: Asset; onClose: () => vo
           >
             {previewing ? <StopIcon width={12} height={12} /> : <PlayIcon width={12} height={12} />}
             {previewing ? "Stop" : "Listen from the start"}
+          </button>
+          <button
+            onClick={() => void trimSilence()}
+            disabled={finding}
+            className={buttonClass}
+            title="Sets the start and end to where the sound can first and last be heard, so it begins at once and stops when it is over"
+          >
+            {finding ? "Looking…" : "Trim silence"}
           </button>
           <span className="text-xs tabular-nums text-dim">
             {previewing ? `${formatExact(previewing.position_ms)} · ` : ""}
@@ -352,17 +476,34 @@ export function TrimEditor({ asset, onClose }: { asset: Asset; onClose: () => vo
         </div>
 
         <div className="flex items-center gap-2 border-t border-line pt-3">
-          <button
-            onClick={() => {
-              setStart(0);
-              setEnd(null);
-              setCuts([]);
-            }}
-            disabled={whole}
-            className="mr-auto text-xs font-medium text-dim underline-offset-2 hover:text-ink hover:underline disabled:opacity-40"
-          >
-            Play the whole file again
-          </button>
+          {resetting ? (
+            <span className="mr-auto flex items-center gap-2 text-xs">
+              <span className="text-dim">Remove the trim and all skips?</span>
+              <button
+                onClick={() => {
+                  setStart(0);
+                  setEnd(null);
+                  setCuts([]);
+                  setResetting(false);
+                }}
+                className="rounded bg-danger px-2 py-1 font-medium text-white"
+              >
+                Reset
+              </button>
+              <button onClick={() => setResetting(false)} className="rounded bg-line px-2 py-1 font-medium">
+                Keep
+              </button>
+            </span>
+          ) : (
+            <button
+              onClick={() => setResetting(true)}
+              disabled={whole}
+              title="Go back to playing the whole file"
+              className="mr-auto text-xs font-medium text-dim underline-offset-2 hover:text-ink hover:underline disabled:opacity-40"
+            >
+              Reset
+            </button>
+          )}
           <button onClick={onClose} className={buttonClass}>
             Cancel
           </button>

@@ -258,6 +258,32 @@ pub fn waveform(path: &Path, buckets: usize, duration_ms: i64) -> Result<Vec<f32
     Ok(peaks)
 }
 
+/// Where the audible part of a sound begins and ends, in milliseconds:
+/// the silence before the first sound and after the last is left out.
+/// "Silent" means more than 45 dB below the file's loudest moment, so a
+/// reverb tail is kept. A little room is left on both sides so nothing
+/// is clipped. `None` for an end that is the end of the file.
+pub fn audible_part(path: &Path, duration_ms: i64) -> Result<(i64, Option<i64>)> {
+    if duration_ms <= 0 {
+        return Ok((0, None));
+    }
+    // About 10 ms a slice for short sounds; coarser for long ones.
+    let buckets = ((duration_ms / 10) as usize).clamp(50, 4000);
+    let peaks = waveform(path, buckets, duration_ms)?;
+    let quiet = 0.0056; // -45 dB relative to the loudest slice
+    let Some(first) = peaks.iter().position(|p| *p > quiet) else {
+        return Ok((0, None));
+    };
+    let last = peaks.iter().rposition(|p| *p > quiet).unwrap_or(buckets - 1);
+    let slice = duration_ms as f64 / buckets as f64;
+    let start = ((first as f64 * slice) as i64 - 20).max(0);
+    let end = (((last + 1) as f64 * slice) as i64 + 150).min(duration_ms);
+    // Less than a tenth of a second is not worth a trim.
+    let start = if start < 100 { 0 } else { start };
+    let end = (duration_ms - end >= 100).then_some(end);
+    Ok((start, end))
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::f32::consts::TAU;
@@ -301,6 +327,29 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::write_sine_wav;
     use super::*;
+
+    #[test]
+    fn silence_at_both_ends_is_found() {
+        // 1 s of silence, 1 s of tone, 2 s of silence.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stinger.wav");
+        testutil::write_sine_wav(&path, 4.0, 440.0, -6.0, 1);
+        let mut bytes = std::fs::read(&path).unwrap();
+        for i in (0..4 * 48_000usize).filter(|i| !(48_000..96_000).contains(i)) {
+            bytes[44 + 2 * i] = 0;
+            bytes[45 + 2 * i] = 0;
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let (start, end) = audible_part(&path, 4_000).unwrap();
+        assert!((950..=1_000).contains(&start), "start {start}");
+        let end = end.unwrap();
+        assert!((2_000..=2_200).contains(&end), "end {end}");
+
+        // A sound that fills its file is left alone.
+        let full = dir.path().join("full.wav");
+        testutil::write_sine_wav(&full, 1.0, 440.0, -6.0, 1);
+        assert_eq!(audible_part(&full, 1_000).unwrap(), (0, None));
+    }
 
     #[test]
     fn a_waveform_follows_the_loud_and_quiet_parts() {

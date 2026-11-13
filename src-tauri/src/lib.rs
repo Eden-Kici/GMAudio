@@ -214,6 +214,34 @@ fn library_waveform(state: State<'_, AppState>, asset_id: i64, buckets: usize) -
     gmaudio_core::analyze::waveform(Path::new(&asset.path), buckets, asset.duration_ms.unwrap_or(0)).map_err(msg)
 }
 
+/// Where a sound's audible part begins and ends, leaving out silence at
+/// both ends. The end is null when the sound runs to the end of the file.
+#[tauri::command(async)]
+fn library_audible_part(state: State<'_, AppState>, asset_id: i64) -> CmdResult<(i64, Option<i64>)> {
+    let asset = state.library.asset(asset_id).ok_or("That sound is no longer in the library.")?;
+    gmaudio_core::analyze::audible_part(Path::new(&asset.path), asset.duration_ms.unwrap_or(0)).map_err(msg)
+}
+
+/// Trims the silence off both ends of several sounds, keeping any parts
+/// they already skip. Returns how many were changed.
+#[tauri::command(async)]
+fn library_trim_silence(state: State<'_, AppState>, asset_ids: Vec<i64>) -> CmdResult<usize> {
+    let mut changed = 0;
+    for id in asset_ids {
+        let Some(asset) = state.library.asset(id) else { continue };
+        let Ok((start, end)) = gmaudio_core::analyze::audible_part(Path::new(&asset.path), asset.duration_ms.unwrap_or(0)) else {
+            continue;
+        };
+        let cuts = asset.edit.as_ref().map(|e| e.cuts.clone()).unwrap_or_default();
+        let edit = gmaudio_core::model::AssetEdit { start_ms: start, end_ms: end, cuts };
+        if asset.edit.as_ref() != Some(&edit) && (start > 0 || end.is_some()) {
+            state.library.set_edit(id, Some(edit)).map_err(msg)?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
 /// Plays a sound once with a trim that has not been saved yet, from a
 /// chosen point, on the effects channel.
 #[tauri::command(async)]
@@ -854,6 +882,8 @@ pub fn run() {
             engine_move_queued,
             engine_swap_with_playing,
             library_waveform,
+            library_audible_part,
+            library_trim_silence,
             engine_preview,
             engine_move_to_channel,
             engine_requeue_playing,

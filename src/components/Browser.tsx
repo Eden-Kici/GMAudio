@@ -434,6 +434,21 @@ function BulkBar() {
           ))}
         </select>
       )}
+      <button
+        onClick={() =>
+          void api
+            .trimSilence(picked)
+            .then(async (n) => {
+              await useStore.getState().refresh();
+              useStore.getState().notify(n === 0 ? "No silence found at the start or end of these sounds." : `Trimmed the silence off ${n} sound${n === 1 ? "" : "s"}.`, "info");
+            })
+            .catch((e) => useStore.getState().notify(String(e)))
+        }
+        title="For each selected sound: start where it can first be heard and end where it dies away. The files are not changed, and Trim… can undo it."
+        className="h-7 rounded-md bg-raised px-3 font-medium hover:bg-line"
+      >
+        Trim silence
+      </button>
       <button onClick={clear} className="ml-auto h-7 rounded-md bg-raised px-3 font-medium hover:bg-line">
         Done
       </button>
