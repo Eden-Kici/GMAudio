@@ -3,7 +3,7 @@
 An audio control center for running tabletop RPG sessions: music, ambience and
 sound effects from your own files, on one screen. Windows 10/11.
 
-Version 0.9.3 (shown at the bottom of Settings, and in `VERSION`).
+Version 0.9.4 (shown at the bottom of Settings, and in `VERSION`).
 
 Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 
@@ -60,23 +60,65 @@ Simple mode is the default. Advanced mode (Settings) shows the finer controls.
 Not supported: Opus files (the audio decoder has no Opus codec), Spotify and
 YouTube.
 
-## Get the app (.exe)
+## Install
 
-Two ways, no terminal needed afterwards:
+Each version is built by GitHub and posted under
+[Releases](https://github.com/Eden-Kici/GMAudio/releases).
 
-- **Download it.** Each version is built by GitHub and posted under
-  [Releases](https://github.com/Eden-Kici/GMAudio/releases). Download
-  `GMAudio_<version>_x64-setup.exe` and run it. Windows may warn that the
-  app is from an unknown publisher (it is not signed): choose "More info",
-  then "Run anyway".
-- **Build it yourself.** Double-click `build-exe.bat` in this folder. It
-  takes a few minutes and opens the folder with the installer. A plain
-  `gmaudio.exe` that runs without installing is in `target\release`.
+### Windows 10 / 11
 
-## Run it
+1. Download `GMAudio_<version>_x64-setup.exe` from the latest release.
+2. Run it. Windows may warn that the app is from an unknown publisher (it
+   is not signed): choose "More info", then "Run anyway".
+3. Start GMAudio from the Start menu.
 
-Needs [Rust](https://rustup.rs), [Node.js](https://nodejs.org) 20.19 or newer
-(or 22.12 or newer) and the Visual Studio C++ build tools.
+To update, install the newer version over the old one. Your library and
+settings are kept.
+
+### Linux
+
+Built on Ubuntu 22.04; needs WebKitGTK 4.1.
+
+- **Debian / Ubuntu / Mint:** download `GMAudio_<version>_amd64.deb`, then
+
+  ```
+  sudo apt install ./GMAudio_<version>_amd64.deb
+  gmaudio
+  ```
+
+- **Any other distribution:** download `GMAudio_<version>_amd64.AppImage`,
+  then
+
+  ```
+  chmod +x GMAudio_<version>_amd64.AppImage
+  ./GMAudio_<version>_amd64.AppImage
+  ```
+
+Linux is not what the app was designed for and is tested less. Two known
+differences: the Freesound key is kept only in the library file, and
+global hotkeys do not work under Wayland.
+
+## Build it yourself
+
+Needs [Rust](https://rustup.rs) and [Node.js](https://nodejs.org) 20.19 or
+newer (or 22.12 or newer).
+
+- **Windows:** also the Visual Studio C++ build tools ("Desktop
+  development with C++"). Then double-click `build-exe.bat`. It opens the
+  folder with the installer; a plain `gmaudio.exe` that runs without
+  installing is in `target\release`.
+- **Linux:** first the build packages (Debian / Ubuntu names):
+
+  ```
+  sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev
+  ./build-linux.sh
+  ```
+
+The first build takes several minutes.
+
+## Run it while developing
+
+With the same tools as for building:
 
 ```powershell
 npm install
@@ -86,9 +128,6 @@ npm run tauri dev
 The first build takes several minutes. Later builds take seconds. If
 PowerShell refuses to run `npm`, use `npm.cmd` instead, or run
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
-
-To make an installer: `npm run tauri build` (output in
-`target\release\bundle\nsis`).
 
 ## Test it
 
