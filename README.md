@@ -3,7 +3,7 @@
 An audio control center for running tabletop RPG sessions: music, ambience and
 sound effects from your own files, on one screen. Windows 10/11.
 
-Version 0.9.2 (shown at the bottom of Settings, and in `VERSION`).
+Version 0.9.3 (shown at the bottom of Settings, and in `VERSION`).
 
 Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 
@@ -59,6 +59,19 @@ Simple mode is the default. Advanced mode (Settings) shows the finer controls.
 
 Not supported: Opus files (the audio decoder has no Opus codec), Spotify and
 YouTube.
+
+## Get the app (.exe)
+
+Two ways, no terminal needed afterwards:
+
+- **Download it.** Each version is built by GitHub and posted under
+  [Releases](https://github.com/Eden-Kici/GMAudio/releases). Download
+  `GMAudio_<version>_x64-setup.exe` and run it. Windows may warn that the
+  app is from an unknown publisher (it is not signed): choose "More info",
+  then "Run anyway".
+- **Build it yourself.** Double-click `build-exe.bat` in this folder. It
+  takes a few minutes and opens the folder with the installer. A plain
+  `gmaudio.exe` that runs without installing is in `target\release`.
 
 ## Run it
 
