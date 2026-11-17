@@ -13,6 +13,10 @@ import { buttonClass, Field, Slider, Toggle } from "./ui";
 export function SettingsView() {
   const advanced = useDocs((s) => s.advanced);
   const setAdvanced = useDocs((s) => s.setAdvanced);
+  const showFileName = useDocs((s) => s.showFileName);
+  const setShowFileName = useDocs((s) => s.setShowFileName);
+  const searchFileNames = useDocs((s) => s.searchFileNames);
+  const setSearchFileNames = useDocs((s) => s.setSearchFileNames);
   const hotkeys = useDocs((s) => s.hotkeys);
   const setHotkeys = useDocs((s) => s.setHotkeys);
   const duckDb = useStore((s) => s.engine?.duck_db ?? -8);
@@ -40,6 +44,21 @@ export function SettingsView() {
             onChange={setAdvanced}
             label="Show advanced controls"
             hint="Fade times, solo, level meters, pad variation, system-wide keys and more. Off keeps things simple."
+          />
+        </section>
+
+        <section className="space-y-3 rounded-xl bg-panel p-4">
+          <Toggle
+            on={showFileName}
+            onChange={setShowFileName}
+            label="Show file names of renamed sounds"
+            hint="In the library, a renamed sound shows its file's name in small print next to the new name."
+          />
+          <Toggle
+            on={searchFileNames}
+            onChange={setSearchFileNames}
+            label="Search file names too"
+            hint="Searching finds a renamed sound by its file's name as well as by its new name."
           />
         </section>
 

@@ -232,6 +232,7 @@ interface RowProps {
 
 const Row = memo(function Row({ asset, folder, playing, selected, paneId, picked, picking }: RowProps) {
   const select = useStore((s) => s.select);
+  const showFileName = useDocs((s) => s.showFileName);
   const pick = useStore((s) => s.pick);
   const play = useStore((s) => s.play);
   const openMenu = useStore((s) => s.openMenu);
@@ -291,7 +292,14 @@ const Row = memo(function Row({ asset, folder, playing, selected, paneId, picked
             )}
           </span>
           <span className="min-w-0 flex-1">
-            <span className={`block truncate text-[13.5px] font-medium ${failed ? "text-dim" : ""}`}>{asset.name}</span>
+            <span className="flex min-w-0 items-baseline gap-2">
+              <span className={`truncate text-[13.5px] font-medium ${failed ? "text-dim" : ""}`}>{asset.name}</span>
+              {asset.title && showFileName && (
+                <span className="min-w-0 max-w-[45%] shrink truncate text-[11px] text-faint" title={`File: ${asset.file_name}`}>
+                  {asset.file_name}
+                </span>
+              )}
+            </span>
             {(folder || otherTags.length > 0) && (
               <span className="mt-0.5 flex items-center gap-1.5 text-xs text-faint">
                 {folder && <span className="truncate">{folder}</span>}
@@ -461,6 +469,61 @@ function BulkBar() {
   );
 }
 
+/** A name for the sound in the app. The file keeps its own name. */
+function TitleField({ asset }: { asset: Asset }) {
+  const refresh = useStore((s) => s.refresh);
+  const [draft, setDraft] = useState<string | null>(null);
+  const value = draft ?? asset.title ?? "";
+  const save = () => {
+    if (draft === null) return;
+    setDraft(null);
+    if (draft.trim() === (asset.title ?? "")) return;
+    void rename(draft);
+  };
+  const rename = async (title: string) => {
+    try {
+      const updated = await api.setTitle(asset.id, title);
+      // Editors and cue lists show names from this cache.
+      useDocs.setState((s) => ({ assets: { ...s.assets, [updated.id]: updated } }));
+      await refresh();
+    } catch (e) {
+      useStore.getState().notify(String(e));
+    }
+  };
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="mr-1 w-14 text-dim">Name</span>
+      <input
+        value={value}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            setDraft(null);
+          }
+        }}
+        placeholder={asset.file_name}
+        aria-label="Name in the app"
+        spellCheck={false}
+        className={`${inputBase} h-7 w-64 text-xs`}
+      />
+      {asset.title && (
+        <button
+          onClick={() => {
+            setDraft(null);
+            void rename("");
+          }}
+          className="font-medium text-dim underline-offset-2 hover:text-ink hover:underline"
+        >
+          Use the file name
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Details({ asset }: { asset: Asset }) {
   const advanced = useDocs((s) => s.advanced);
   const refresh = useStore((s) => s.refresh);
@@ -496,6 +559,8 @@ function Details({ asset }: { asset: Asset }) {
         <p className="text-danger">This file could not be read: {asset.error ?? "unknown problem"}.</p>
       )}
 
+      <TitleField asset={asset} />
+
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mr-1 w-14 text-dim">Plays as</span>
         {CHANNELS.map((c) => {
@@ -514,9 +579,6 @@ function Details({ asset }: { asset: Asset }) {
             </button>
           );
         })}
-        <span className="text-faint">
-          {channels.length === 1 ? "One click plays it there." : channels.length === 0 ? "Pick one for one-click play." : ""}
-        </span>
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
@@ -584,7 +646,6 @@ function Details({ asset }: { asset: Asset }) {
             label="This sound's own volume, on top of the automatic levelling"
             className="w-64"
           />
-          <span className="text-faint">For a sound that always feels too loud or too quiet.</span>
         </div>
       )}
 

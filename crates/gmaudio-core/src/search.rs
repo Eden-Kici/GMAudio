@@ -12,7 +12,10 @@ use crate::model::Asset;
 
 struct Entry {
     asset: Asset,
+    /// The name shown: the custom title, or the file's name.
     name_lc: String,
+    /// The file's own name, when a custom title hides it.
+    file_lc: Option<String>,
     tags_lc: Vec<String>,
     /// Folder part of the path, lowercased.
     dir_lc: String,
@@ -25,8 +28,10 @@ impl Entry {
             Some(i) => path_lc[..i].to_string(),
             None => String::new(),
         };
+        let file_lc = asset.title.as_ref().map(|_| asset.file_name.to_lowercase()).filter(|f| !f.is_empty());
         Self {
             name_lc: asset.name.to_lowercase(),
+            file_lc,
             tags_lc: asset.tags.iter().map(|t| t.name.to_lowercase()).collect(),
             dir_lc,
             asset,
@@ -45,6 +50,8 @@ pub struct Query {
     /// 0 means no limit.
     pub limit: usize,
     pub include_missing: bool,
+    /// Match only the names shown, not file names hidden behind a title.
+    pub skip_file_names: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,7 +127,7 @@ impl Index {
             }
             let mut score = 0;
             for token in &tokens {
-                match score_token(token, e) {
+                match score_token(token, e, !query.skip_file_names) {
                     Some(s) => score += s,
                     None => continue 'entries,
                 }
@@ -148,34 +155,35 @@ impl Index {
 }
 
 /// Scores one query word against an asset. `None` means no match.
-fn score_token(token: &str, e: &Entry) -> Option<i32> {
+fn score_token(token: &str, e: &Entry, file_names: bool) -> Option<i32> {
     if let Some(tag) = token.strip_prefix('#') {
         return score_tags(tag, e);
     }
-    let mut best: Option<i32> = None;
-
-    if let Some(pos) = e.name_lc.find(token) {
-        let at_word_start = pos == 0
-            || e.name_lc[..pos]
-                .chars()
-                .next_back()
-                .is_some_and(|c| !c.is_alphanumeric());
-        let mut s = match (pos, at_word_start) {
-            (0, _) => 120,
-            (_, true) => 100,
-            _ => 80,
-        };
-        if e.name_lc.len() == token.len() {
-            s += 30;
-        }
-        best = best.max(Some(s));
-    }
+    // A file name hidden behind a title counts a little less than the title.
+    let file = e.file_lc.as_deref().filter(|_| file_names);
+    let mut best = score_name(token, &e.name_lc);
+    best = best.max(file.and_then(|f| score_name(token, f)).map(|s| s - 10));
     best = best.max(score_tags(token, e));
     if e.dir_lc.contains(token) {
         best = best.max(Some(40));
     }
     // Fuzzy matching is the last resort, only when nothing matched literally.
-    best.or_else(|| fuzzy(token, &e.name_lc))
+    best.or_else(|| fuzzy(token, &e.name_lc)).or_else(|| file.and_then(|f| fuzzy(token, f)))
+}
+
+/// Scores a word found literally in a name.
+fn score_name(token: &str, name: &str) -> Option<i32> {
+    let pos = name.find(token)?;
+    let at_word_start = pos == 0 || name[..pos].chars().next_back().is_some_and(|c| !c.is_alphanumeric());
+    let mut s = match (pos, at_word_start) {
+        (0, _) => 120,
+        (_, true) => 100,
+        _ => 80,
+    };
+    if name.len() == token.len() {
+        s += 30;
+    }
+    Some(s)
 }
 
 fn score_tags(token: &str, e: &Entry) -> Option<i32> {
@@ -247,6 +255,8 @@ mod tests {
             folder_id: 1,
             path: format!("{dir}\\{name}.ogg"),
             name: name.into(),
+            file_name: name.into(),
+            title: None,
             ext: "ogg".into(),
             size: 1,
             mtime: 1,
@@ -406,6 +416,18 @@ mod tests {
     }
 
     /// Milestone 1 acceptance: search under 50 ms on a 10,000-file library.
+    #[test]
+    fn a_custom_title_is_found_and_so_is_the_file_name_unless_turned_off() {
+        let mut wind = asset(1, "Flying through the skies", "C:\\sfx", &[]);
+        wind.title = Some("Wind".into());
+        wind.name = "Wind".into();
+        let idx = Index::new(vec![wind, asset(2, "Windmill creak", "C:\\sfx", &[])]);
+        assert_eq!(names(&idx.search(&q("wind"))), vec!["Wind", "Windmill creak"]);
+        assert_eq!(names(&idx.search(&q("flying through"))), vec!["Wind"]);
+        let titles_only = Query { skip_file_names: true, ..q("flying through") };
+        assert!(idx.search(&titles_only).assets.is_empty());
+    }
+
     #[test]
     fn ten_thousand_files_search_under_50ms() {
         let words = [

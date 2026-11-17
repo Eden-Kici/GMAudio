@@ -59,8 +59,15 @@ pub struct Asset {
     pub id: i64,
     pub folder_id: i64,
     pub path: String,
-    /// File name without extension.
+    /// What the app calls the sound: the custom title when one is set,
+    /// otherwise the file's own name.
     pub name: String,
+    /// File name without extension.
+    #[serde(default)]
+    pub file_name: String,
+    /// A name given in the app. The file itself is never renamed.
+    #[serde(default)]
+    pub title: Option<String>,
     pub ext: String,
     pub size: i64,
     pub mtime: i64,

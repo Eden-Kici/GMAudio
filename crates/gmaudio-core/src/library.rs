@@ -302,6 +302,19 @@ impl Library {
         Ok(asset)
     }
 
+    /// Gives a sound a name in the app; an empty title goes back to the
+    /// file's own name. The file is not renamed.
+    pub fn set_title(&self, asset_id: i64, title: &str) -> Result<Asset> {
+        let title = title.trim();
+        let asset = {
+            let db = self.inner.db.lock().unwrap();
+            db.set_title(asset_id, (!title.is_empty()).then_some(title))?;
+            db.asset(asset_id)?
+        };
+        self.inner.index.write().unwrap().upsert(asset.clone());
+        Ok(asset)
+    }
+
     /// Sets whether a sound repeats whenever it is played.
     pub fn set_always_loop(&self, asset_id: i64, on: bool) -> Result<Asset> {
         let asset = {

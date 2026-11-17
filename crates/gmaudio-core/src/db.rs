@@ -81,11 +81,15 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE assets ADD COLUMN always_loop INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE assets ADD COLUMN edit TEXT;
     ",
+    // 5: a name given in the app; the file keeps its own
+    "
+    ALTER TABLE assets ADD COLUMN title TEXT;
+    ",
 ];
 
 const ASSET_COLUMNS: &str = "id, folder_id, path, name, ext, size, mtime, hash, duration_ms, \
      sample_rate, channels, loudness_lufs, gain_db, bpm, beat_offset_ms, status, error, missing, \
-     source, license, attribution, trim_db, always_loop, edit";
+     source, license, attribution, trim_db, always_loop, edit, title";
 
 /// A file found on disk during a folder scan.
 #[derive(Debug, Clone)]
@@ -123,11 +127,15 @@ fn now() -> i64 {
 }
 
 fn asset_from_row(row: &Row) -> rusqlite::Result<Asset> {
+    let file_name: String = row.get(3)?;
+    let title: Option<String> = row.get::<_, Option<String>>(24)?.filter(|t| !t.trim().is_empty());
     Ok(Asset {
         id: row.get(0)?,
         folder_id: row.get(1)?,
         path: row.get(2)?,
-        name: row.get(3)?,
+        name: title.clone().unwrap_or_else(|| file_name.clone()),
+        file_name,
+        title,
         ext: row.get(4)?,
         size: row.get(5)?,
         mtime: row.get(6)?,
@@ -565,6 +573,13 @@ impl Db {
     pub fn set_trim(&self, asset_id: i64, trim_db: f64) -> Result<()> {
         self.conn
             .execute("UPDATE assets SET trim_db = ?2 WHERE id = ?1", params![asset_id, trim_db])?;
+        Ok(())
+    }
+
+    /// Gives a sound a name in the app. `None` goes back to the file's name.
+    pub fn set_title(&self, asset_id: i64, title: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE assets SET title = ?2 WHERE id = ?1", params![asset_id, title])?;
         Ok(())
     }
 

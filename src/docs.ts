@@ -1,7 +1,7 @@
 // Scenes, boards and other saved documents, plus interface preferences.
 
 import { create } from "zustand";
-import { api, events, type Asset, type Doc } from "./api";
+import { api, events, searchPrefs, type Asset, type Doc } from "./api";
 import { message, useStore } from "./store";
 import { useMemo } from "react";
 import type { Board, Campaign, Hotkey, MusicSet, Scene, Session } from "./types";
@@ -36,6 +36,12 @@ interface DocsStore {
   view: View;
   /** Show every control. Off: only what a new GM needs. */
   advanced: boolean;
+  /** Under a renamed sound, show the file's own name. */
+  showFileName: boolean;
+  /** Searching also finds renamed sounds by their file's name. */
+  searchFileNames: boolean;
+  setShowFileName: (on: boolean) => void;
+  setSearchFileNames: (on: boolean) => void;
   /** Sounds by id, for showing names in editors. */
   assets: Record<number, Asset>;
 
@@ -69,11 +75,13 @@ export const useDocs = create<DocsStore>((set, get) => ({
   hotkeys: [],
   view: "library",
   advanced: false,
+  showFileName: true,
+  searchFileNames: true,
   assets: {},
 
   load: async () => {
     try {
-      const [scenes, boards, sets, campaigns, sessions, scope, setup, hotkeys, view, advanced] = await Promise.all([
+      const [scenes, boards, sets, campaigns, sessions, scope, setup, hotkeys, view, advanced, showFileName, searchFileNames] = await Promise.all([
         api.docList<Scene>("scene"),
         api.docList<Board>("board"),
         api.docList<MusicSet>("set"),
@@ -84,7 +92,10 @@ export const useDocs = create<DocsStore>((set, get) => ({
         api.uiGet("hotkeys"),
         api.uiGet("view"),
         api.uiGet("advanced"),
+        api.uiGet("show_file_name"),
+        api.uiGet("search_file_names"),
       ]);
+      searchPrefs.fileNames = searchFileNames !== "0";
       set({
         loaded: true,
         scenes,
@@ -97,6 +108,8 @@ export const useDocs = create<DocsStore>((set, get) => ({
         hotkeys: hotkeys ? (JSON.parse(hotkeys) as Hotkey[]) : [],
         view: (view as View | null) ?? "library",
         advanced: advanced === "1",
+        showFileName: showFileName !== "0",
+        searchFileNames: searchFileNames !== "0",
       });
       // Sound names can change when files are renamed or rescanned.
       void events.libraryChanged(() => {
@@ -149,6 +162,18 @@ export const useDocs = create<DocsStore>((set, get) => ({
   setView: (view) => {
     set({ view });
     void api.uiSet("view", view).catch(() => {});
+  },
+
+  setShowFileName: (showFileName) => {
+    set({ showFileName });
+    void api.uiSet("show_file_name", showFileName ? "1" : "0").catch(() => {});
+  },
+
+  setSearchFileNames: (searchFileNames) => {
+    set({ searchFileNames });
+    searchPrefs.fileNames = searchFileNames;
+    void api.uiSet("search_file_names", searchFileNames ? "1" : "0").catch(() => {});
+    void useStore.getState().refresh();
   },
 
   setAdvanced: (advanced) => {

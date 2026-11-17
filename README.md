@@ -3,7 +3,7 @@
 An audio control center for running tabletop RPG sessions: music, ambience and
 sound effects from your own files, on one screen. Windows 10/11.
 
-Version 0.9.4 (shown at the bottom of Settings, and in `VERSION`).
+Version 0.9.5 (shown at the bottom of Settings, and in `VERSION`).
 
 Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 
@@ -16,6 +16,8 @@ Status: **all five milestones built.** Builds and runs on Windows 10 and 11.
 - Every file is measured once (length, loudness, tempo) so all sounds play at
   a similar level.
 - Search by name, folder or `#tag`. Typos and skipped letters still match.
+- Rename a sound in the app (the file keeps its name); search finds it by
+  either name.
 - Channel tags (Music, Ambience, Sound effects, Stinger) decide where a sound
   plays. One tag: one click plays it there. Several: one button each.
   Right-click or drag onto a channel to play anywhere.

@@ -95,6 +95,10 @@ export interface Asset {
   license: string | null;
   /** The credit line a downloaded sound asks for. */
   attribution: string | null;
+  /** The file's own name, without extension. `name` is what to show. */
+  file_name: string;
+  /** A name given in the app; null when the file's name is used. */
+  title: string | null;
   /** The user's own volume correction in dB. */
   trim_db: number;
   /** Repeats whenever it is played, on any channel. */
@@ -275,6 +279,9 @@ export interface Doc<T> {
   data: T;
 }
 
+/** Whether searches also match file names hidden behind a custom title. Set from Settings. */
+export const searchPrefs = { fileNames: true };
+
 export const api = {
   folders: () => invoke<Folder[]>("library_folders"),
   addFolder: (path: string) => invoke<Folder>("library_add_folder", { path }),
@@ -283,8 +290,10 @@ export const api = {
   addStarterSounds: () => invoke<void>("library_add_starter_sounds"),
   search: (text: string, folderId: number | null, tags: string[], limit: number) =>
     invoke<SearchResult>("library_search", {
-      query: { text, folder_id: folderId, tags, limit },
+      query: { text, folder_id: folderId, tags, limit, skip_file_names: !searchPrefs.fileNames },
     }),
+  /** Names a sound in the app; an empty title goes back to the file's name. */
+  setTitle: (assetId: number, title: string) => invoke<Asset>("library_set_title", { assetId, title }),
   scanStatus: () => invoke<ScanStatus>("library_status"),
   setTags: (assetId: number, tags: Tag[]) => invoke<Asset>("library_set_tags", { assetId, tags }),
   setTagOn: (assetIds: number[], tag: Tag, on: boolean) =>

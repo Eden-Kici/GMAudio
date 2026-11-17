@@ -37,6 +37,9 @@ struct BundleAsset {
     /// The sound's id on the computer that made the bundle.
     id: i64,
     name: String,
+    /// The name given in the app, if any.
+    #[serde(default)]
+    title: Option<String>,
     ext: String,
     /// Fingerprint of the file's contents, to recognise a copy.
     hash: Option<String>,
@@ -113,7 +116,8 @@ pub fn export(library: &Library, path: &Path, data: Value, asset_ids: &[i64], in
         }
         assets.push(BundleAsset {
             id,
-            name: asset.name,
+            name: asset.file_name,
+            title: asset.title,
             ext: asset.ext,
             hash: asset.hash,
             tags: asset.tags,
@@ -205,6 +209,9 @@ pub fn import(library: &Library, path: &Path, audio_folder: &Path) -> Result<Imp
                     // Carry the sound's tags over, unless folder names already tagged it.
                     if !asset.tags.is_empty() && library.asset(*local).is_some_and(|a| a.tags.is_empty()) {
                         library.set_tags(*local, &asset.tags)?;
+                    }
+                    if let Some(title) = &asset.title {
+                        library.set_title(*local, title)?;
                     }
                     if let Some(attribution) = &asset.attribution {
                         library.set_credit(&target.to_string_lossy(), asset.license.as_deref().unwrap_or(""), attribution)?;

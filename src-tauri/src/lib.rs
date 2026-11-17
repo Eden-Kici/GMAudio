@@ -739,6 +739,11 @@ fn engine_requeue_playing(state: State<'_, AppState>, id: u64, to: usize) -> Cmd
 }
 
 #[tauri::command]
+fn library_set_title(state: State<'_, AppState>, asset_id: i64, title: String) -> CmdResult<Asset> {
+    state.library.set_title(asset_id, &title).map_err(msg)
+}
+
+#[tauri::command]
 fn library_set_always_loop(state: State<'_, AppState>, asset_id: i64, on: bool) -> CmdResult<Asset> {
     state.library.set_always_loop(asset_id, on).map_err(msg)
 }
@@ -888,6 +893,7 @@ pub fn run() {
             engine_move_to_channel,
             engine_requeue_playing,
             library_set_always_loop,
+            library_set_title,
             library_set_edit,
             engine_pause,
             youtube_import,
